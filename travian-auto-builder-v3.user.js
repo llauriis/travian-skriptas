@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.19
+// @version      20.20
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -3570,6 +3570,15 @@
     return [...document.querySelectorAll('table.under_progress tr, .under_progress tr')].filter(r => r.querySelector(`img.u${num}`))
       .reduce((a, r) => a + (parseInt((clean(r.textContent).match(/\d+/) || ['0'])[0], 10) || 0), 0);
   }
+  // Keli kariai „PASIRINKTA“: renkamas tas, kuriam iki šiol IŠLEISTA MAŽIAUSIAI resursų (lygiai resursų kiekvienam tipui, ne vienetų).
+  // Naujai pridėtas tipas pradeda nuo mažiausios esamos sumos (kad ilgai negamintų vien jo).
+  function pickBalanced(units, spent) {
+    if (!units.length) return [];
+    const known = units.filter(([u]) => spent[u] != null).map(([u]) => spent[u]);
+    const base = known.length ? Math.min(...known) : 0;
+    for (const [u] of units) if (spent[u] == null) spent[u] = Math.max(0, base - 1);   // naujas tipas – vos mažiau už mažiausią (pirmas eina jis, paskui – lygiai)
+    return units.slice().sort((a, b) => spent[a[0]] - spent[b[0]])[0];
+  }
   function trainCustom(tc) {
     if (!GM_getValue('trainOn', true) || Date.now() < (vget('trainNext', 0) || 0)) return false;
     const fcEl = document.getElementById('stockBarFreeCrop');
@@ -3577,8 +3586,10 @@
     const lv = vget('blv', {}) || {}, full = vget('trainFull', {}) || {};
     const units = Object.entries(tc.units || {}).filter(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && !(full[u] > Date.now()));
     if (!units.length) return false;
-    const rr = (vget('trainRR', 0) || 0) % units.length; vset('trainRR', rr + 1);
-    const [u, target] = units[rr];
+    const spent = vget('trainSpent', {}) || {};
+    const [u, target] = pickBalanced(units, spent);
+    if (!u) return false;
+    vset('trainSpent', spent);
     const war = !GM_getValue('buildOn', true);                            // karo režimas – treniruoti dažnai ir beveik viskuo
     vset('trainNext', Date.now() + rand(...(war ? [4, 8] : CUSTOM_EVERY)) * 60000);
     jset('trainPlan', { unit: u, label: UNITS_R[u].n, share: war ? 0.9 : CUSTOM_SHARE, max: war ? 300 : CUSTOM_MAX_BATCH, target });
@@ -3768,6 +3779,7 @@
     await sleep(rand(800, 2000));
     GM_setValue('chore', 'trainDone'); GM_setValue('choreTs', Date.now()); GM_setValue('navTs', Date.now());
     log(`Treniruojama: ${n} × ${plan.unit}`);
+    if (plan.target) { const sp = vget('trainSpent', {}) || {}; sp[plan.unit] = (sp[plan.unit] || 0) + n * cost.reduce((a, b) => a + b, 0); vset('trainSpent', sp); }   // resursų balansui tarp tipų
     if (plan.unit === 't10') { const st = stGet(); stSet({ ...st, have: (st.have || 0) + n }); }
     setStatus(`treniruojama: ${n} ${plan.label}`);
     btn.click();
