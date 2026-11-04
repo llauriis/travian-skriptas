@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.25
+// @version      20.26
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -109,7 +109,7 @@
   const OASIS_EI_MAX = 30;
   // HEROJUS + ARMIJA: į oazę su gyvūnais kartu eina ir pėstininkai (bei visi EI), jei kova neišeina į minusą:
   // premija už nukautus gyvūnus (~OASIS_BONUS_PER_UP resursų už 1 gyvūno išlaikymo vnt., iš tavo ataskaitos: 9 vnt. → 1 440) ≥ žuvusių karių kaina
-  const OASIS_ARMY = true, OASIS_BONUS_PER_UP = 160, ARMY_MAX_MIN = 20, OASIS_STOCK_GUESS = 400;   // pėstininkai į oazes – iki 20 min. kelio
+  const OASIS_ARMY = true, OASIS_BONUS_PER_UP = 160, ARMY_MAX_MIN = 20, ARMY_NOHERO_MIN = 50, OASIS_STOCK_GUESS = 400;   // pėstininkai į oazes – iki 20 min. kelio
   const UNIT_ATT_R = { t1: 40, t3: 70, t5: 120 }, UNIT_COST_R = { t1: 400, t3: 600, t5: 1410 };          // daugiausia EI kartu su herojumi
   const OASIS_EI_MAX_DEATHS = 1;    // pirmenybė – kad nežūtų nė vienas; 1 leidžiamas tik jei kitaip oazės nepulsim        // toliausias atstumas, kurį verta ieškoti (laukeliais)
   const OASIS_DETAILS_PER_SCAN = 25;     // kiek oazių su gyvūnais vienu skenavimu patikrinti išsamiai
@@ -2009,7 +2009,7 @@
         // KARIAI BE HEROJAUS: EI + imperionai + legionieriai (pėstininkai – tik iki ARMY_MAX_MIN kelio). Premija už nukautus gyvūnus (~160 už išlaikymo vnt.)
         // į kuprinę ateina IR BE HEROJAUS (patikrinta ataskaitoje) + oazės resursai. Siunčiam, jei (grobis + premija) − žuvusių kaina ≥ ½ žuvusių kainos
         if (!bad) {
-          const all = { t5: useEI ? ei : 0, t3: c.dist * 60 / (7 * TROOP_SPEED) <= ARMY_MAX_MIN ? (tr.imp || 0) : 0, t1: c.dist * 60 / (6 * TROOP_SPEED) <= ARMY_MAX_MIN ? (tr.armyLeg || 0) : 0 };
+          const all = { t5: useEI ? ei : 0, t3: c.dist * 60 / (7 * TROOP_SPEED) <= ARMY_NOHERO_MIN ? (tr.imp || 0) : 0, t1: c.dist * 60 / (6 * TROOP_SPEED) <= ARMY_NOHERO_MIN ? (tr.armyLeg || 0) : 0 };   // be herojaus pėstininkai – iki 50 min.
           // trys sudėtys: visi / tik pėstininkai (pigesni žuvusieji) / tik EI – imama pelningiausia
           const combos = [all, { t5: 0, t3: all.t3, t1: all.t1 }, { t5: all.t5, t3: 0, t1: 0 }].filter(u => u.t5 + u.t3 + u.t1 > 0).filter((u, i2, arr) => arr.findIndex(o => JSON.stringify(o) === JSON.stringify(u)) === i2);
           let bestA = null;
