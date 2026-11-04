@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.24
+// @version      20.25
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -210,11 +210,12 @@
   const FL_SPEED_LEG = 6 * TROOP_SPEED, FL_SPEED_EI = 14 * TROOP_SPEED;   // laukeliai per valandą
   const FL_PARTIAL_COOLDOWN_H = 2;   // paskutinis reidas ne pilnu maišu → tos oazės nepulti tiek valandų
   const FL_MAX_SLOTS = 60;           // kiek daugiausia oazių laikyti sąraše
+  const FL_SIZE_MAX = 20;           // pilnu maišu grįžus – grupė į tą oazę auga ×1,5 (iki tiek); menkas grobis – mažėja
   const FL_EVERY = [5, 9];           // kas kiek min. tikrinti: grįžę kariai (≥2) iškart vėl išsiunčiami, nelaukiant visų           // tik artimos – kitaip kiti aplenkia
   const EO_EVERY = [6, 12];         // kas kiek min. tikrinti, ar kariai namie
   const EO_COOLDOWN = [80, 140];    // tos pačios oazės nepulti dažniau (min.)
   const EO_COOLDOWN_FULL = [50, 80];   // praeitą kartą pilnas maišas – grįžtam greičiau
-    const EO_GROUP_MAX = 6;           // EI į vieną oazę daugiausia (auga po +1, kai praeitas maišas pilnas)
+    const EO_GROUP_MAX = 12;           // EI į vieną oazę daugiausia (auga po +1, kai praeitas maišas pilnas)
   const EO_COOLDOWN_POOR = [150, 240];   // praeitą kartą < 30 % maišo – oazę plėšia kiti, rečiau
   const EI_FAR_MAX_MIN = 45;        // laisvi EI – oazės iki tiek minučių kelio į vieną pusę (~1,5 val. su grįžimu)
   const EI_FAR_EXT_MIN = 75;        // tik kai visos oazės iki EI_FAR_MAX_MIN jau plėštos, o EI liko – iki tiek min. (~2,5 val. su grįžimu)
@@ -1976,7 +1977,7 @@
         const lk = loot[c.x + '|' + c.y];
         if (useEI && lk && lk.cap) {
           const prevN = Math.max(1, Math.round(lk.cap / 100));
-          n = lk.got >= lk.cap ? Math.min(EO_GROUP_MAX, prevN + 1) : lk.got < 0.5 * lk.cap ? Math.max(EO_GROUP, prevN - 1) : Math.max(EO_GROUP, prevN);
+          n = lk.got >= lk.cap ? Math.min(EO_GROUP_MAX, Math.max(prevN + 1, Math.ceil(prevN * 1.5))) : lk.got < 0.5 * lk.cap ? Math.max(EO_GROUP, prevN - 1) : Math.max(EO_GROUP, prevN);
         }
         n = Math.min(n, avail);
         if (avail - n > 0 && avail - n < EO_MIN_TROOPS) n = avail;    // nepalikti vieno
@@ -2220,7 +2221,19 @@
     const modeChanged = GM_getValue('flLastMode', '') !== mode;
     const v = villageXY() || vget('xy', null);
     const now = Date.now();
-    const groups = Math.floor((GM_getValue('flAvail', 0) || 0) / Object.values(per)[0]);
+    const uKey = Object.keys(per)[0], base = per[uKey];
+    let budget = GM_getValue('flAvail', 0) || 0;                       // kiek karių namie – grupės skirtingo dydžio
+    const groups = Math.floor(budget / base);
+    const sizes = jget('flSize', {});
+    // grupės dydis kiekvienai oazei pagal PASKUTINĮ reidą: pilnas maišas → ×1,5 (iki FL_SIZE_MAX); mažiau nei pusė → ×0,7 (ne mažiau base)
+    const sizeOf = sl => {
+      const k = sl.x + '|' + sl.y, cur = sizes[k] || { n: base, t: 0 };
+      if (sl.lastT && sl.lastT > (cur.t || 0)) {
+        const n = sl.full ? Math.min(FL_SIZE_MAX, Math.max(cur.n + 1, Math.ceil(cur.n * 1.5))) : sl.partial ? Math.max(base, Math.floor(cur.n * 0.7)) : cur.n;
+        sizes[k] = { n, t: sl.lastT };
+      }
+      return (sizes[k] || cur).n;
+    };
     const sent = jget('flSent', {}), bad = jget('flBad', {});
     let added = 0, on = 0, off = 0, fullN = 0;
     try {
@@ -2255,22 +2268,24 @@
         .sort((a, b) => (b.full - a.full) || (((sent[a.k] || {}).t || 0) - ((sent[b.k] || {}).t || 0)) || (a.d - b.d));
       const chosen = [];
       for (const sl of elig) {
-        if (chosen.length >= groups) break;
+        if (budget < base) break;
+        const n = Math.min(sizeOf(sl), budget);
         await sleep(rand(400, 1100));
         const info = await tileAnimals(sl.x, sl.y);                    // patikra prieš siunčiant: laisva ir be gyvūnų
-        if (info.free && info.total === 0) { chosen.push(sl); if (sl.full) fullN++; }
+        if (info.free && info.total === 0) { chosen.push({ ...sl, n }); budget -= n; if (sl.full) fullN++; }
         else bad[sl.k] = now + rand(30, 60) * 60000;                   // gyvūnai/užimta – kurį laiką nebandyti
       }
       jset('flBad', bad);
-      const pick = new Set(chosen.map(c => c.id));
-      const upd = slots.filter(sl => pick.has(sl.id) !== sl.active || modeChanged)
-        .map(sl => ({ id: sl.id, listId, x: sl.x, y: sl.y, units, active: pick.has(sl.id) }));
+      jset('flSize', sizes);
+      const pick = new Map(chosen.map(c => [c.id, c.n]));
+      const upd = slots.filter(sl => pick.has(sl.id) || sl.active || modeChanged)       // parinktos – visada (grupės dydis galėjo pasikeisti)
+        .map(sl => ({ id: sl.id, listId, x: sl.x, y: sl.y, units: pick.has(sl.id) ? { ...units, [uKey]: pick.get(sl.id) } : units, active: pick.has(sl.id) }));
       if (upd.length) await flApi('PUT', '/api/v1/farm-list/slot?force', { slots: upd });
       GM_setValue('flLastMode', mode);
       on = chosen.length; off = slots.length - on;
-      jset('flChosen', chosen.map(c => ({ k: c.k })));
+      jset('flChosen', chosen.map(c => ({ k: c.k, n: c.n })));
     } catch (e) { log('Fermų sąrašo klaida:', e && e.message); setStatus('fermų sąrašas: klaida – praleidžiu'); return finishChore(); }
-    log(`Fermų sąrašas (${mode === 'ei' ? 'EI' : 'legionieriai'}, iki ${maxDist.toFixed(1)} lauk.): grupių ${groups}, parinkta ${on} (pilnu maišu ${fullN}), pridėta naujų ${added}`);
+    log(`Fermų sąrašas (${mode === 'ei' ? 'EI' : 'legionieriai'}, iki ${maxDist.toFixed(1)} lauk.): karių ${GM_getValue('flAvail', 0) || 0}, parinkta ${on} oazių (pilnu maišu ${fullN}), grupės: ${(jget('flChosen', []) || []).map(c => c.n).join(', ')}, pridėta naujų ${added}`);
     if (!on) { setStatus(`fermų sąrašas: šiuo metu nėra kur siųsti (grupių ${groups})`); return finishChore(); }
     jset('flInfo', { on, off, added, fullN });
     // puslapį perkrauti, kad mygtukas „Pradžia (n)“ matytų pakeitimus, ir tada paleisti
