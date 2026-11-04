@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.20
+// @version      20.21
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -519,7 +519,7 @@
   const enabled = () => GM_getValue('enabled', false);
   // Atidarytas skripto langas (Kariai, Aukcionas, Fermos, Vietos) – skriptas laukia, kol uždarysi (bet ne ilgiau 10 min.), kad neperkrautų puslapio
   const uiOpen = () => {
-    const el = document.querySelector('#abTrain, #abAuc, #abFarms, #abSites, #abMkt, #abHero, #abStats');
+    const el = document.querySelector('#abTrain, #abAuc, #abFarms, #abSites, #abMkt, #abHero, #abStats, #abOrd');
     if (!el) return false;
     if (!el.dataset.t) el.dataset.t = String(Date.now());
     return Date.now() - +el.dataset.t < 10 * 60000;
@@ -703,6 +703,10 @@
     bMk.textContent = (() => { const c = jget('mktCfg', {}); const pv = c.prio && ownVillageList().find(v => v.did === c.prio); return 'Turgus' + (pv ? ` – viskas → „${pv.name}“` : ' (siuntimai tarp kaimų)'); })();
     bMk.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#357';
     bMk.onclick = showMarket;
+    const bOr = document.createElement('button');
+    bOr.textContent = (() => { const n = Object.values(jget('orders', {}) || {}).reduce((a, l) => a + l.length, 0); return `Statybų užsakymai${n ? ` (${n})` : ''}`; })();
+    bOr.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#a63';
+    bOr.onclick = showOrders;
     const bSt = document.createElement('button');
     bSt.textContent = (() => { const st = jget('stats', []).filter(e => Date.now() - e.ts < 24 * 3600000); const net = st.reduce((a, e) => a + e.loot - e.lost, 0); return `Pelnas 24 val.: ${net >= 0 ? '+' : ''}${Math.round(net).toLocaleString('lt-LT')}`; })();
     bSt.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#357';
@@ -711,7 +715,7 @@
     bH.textContent = (() => { const c = hc(); return `Karžygys: oazės nuo ${c.oasisMin} %, nuotykiai ${c.adv ? 'nuo ' + c.advMin + ' %' : 'IŠJ.'}`; })();
     bH.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#7a4';
     bH.onclick = showHero;
-        wrap.append(b, bB, bH, bD, bSt, b2, bK, b3, b4, b5, b6, b7, b8, b9, bA, bAL, bMk, bN, bE, statusEl);
+        wrap.append(b, bB, bOr, bH, bD, bSt, b2, bK, b3, b4, b5, b6, b7, b8, b9, bA, bAL, bMk, bN, bE, statusEl);
     document.body.appendChild(wrap);
   }
 
@@ -2488,6 +2492,17 @@
     const sel = document.querySelector('select#demolish');
     const btn = document.querySelector('button#btn_demolish');
     if (!sel || !btn || btn.disabled) { setStatus('griovimas: dabar negalima (jau griaunama?)'); return finishChore(); }
+    const dt = vget('demoTarget', null); vset('demoTarget', null);
+    if (dt && dt.slot) {                                                      // TAVO UŽSAKYMAS: griauti konkretų pastatą
+      const o = [...sel.options].find(x => String(x.value) === String(dt.slot) || new RegExp('^\\s*' + dt.slot + '\\.').test(clean(x.textContent)));
+      if (!o) { setStatus(`griovimas: vietos ${dt.slot} sąraše nėra`); log('Griovimas: vietos', dt.slot, 'nerasta pasirinkime'); return finishChore(); }
+      sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(rand(800, 1600));
+      log('Griaunama pagal užsakymą:', clean(o.textContent).trim());
+      setStatus(`griaunama (užsakymas): ${clean(o.textContent).trim()}`);
+      btn.click(); await sleep(rand(2000, 3000));
+      return finishChore();
+    }
     const cr = [...sel.options].map(o => ({ v: o.value, t: clean(o.textContent).trim() }))
       .filter(o => /Slėptuvė|Cranny/i.test(o.t)).map(o => ({ ...o, lvl: +((o.t.match(/(\d+)\s*$/) || [])[1] || 0) }))
       .sort((a, b) => a.lvl - b.lvl);
@@ -2562,6 +2577,73 @@
       log('Karžygio nustatymai:', JSON.stringify(nc), 'oazės:', GM_getValue('oasisMode'));
       box.remove(); location.reload();
     };
+  }
+  // ---- TAVO STATYBŲ UŽSAKYMAI (langas „Statybų užsakymai“): pirmiau už planą, vykdomi ir karo režime ----
+  // { did: [ { id, type: 'up'|'new'|'demo', slot, gid, to } ] }
+  const BNAME = { 1: 'Medžio kirtavietė', 2: 'Molio karjeras', 3: 'Geležies kasykla', 4: 'Grūdų laukas', 5: 'Lentpjūvė', 6: 'Plytinė', 7: 'Liejykla', 8: 'Malūnas', 9: 'Kepykla', 10: 'Sandėlis', 11: 'Klėtis', 13: 'Kalvė', 14: 'Turnyrų aikštė', 15: 'Gyvenamasis pastatas', 16: 'Susibūrimo vieta', 17: 'Turgavietė', 18: 'Ambasada', 19: 'Kareivinės', 20: 'Arklidės', 21: 'Dirbtuvės', 22: 'Akademija', 23: 'Slėptuvė', 24: 'Rotušė', 25: 'Rezidencija', 26: 'Valdovų rūmai', 27: 'Iždinė', 28: 'Prekybos rūmai', 31: 'Mūrinė siena', 34: 'Akmentašys', 37: 'Karžygio dvaras', 38: 'Didysis sandėlis', 39: 'Didžioji klėtis', 41: 'Arklių girdykla' };
+  const BCAT = { 5: 3, 6: 3, 7: 3, 8: 3, 9: 3, 10: 1, 11: 1, 13: 2, 14: 2, 15: 1, 16: 2, 17: 1, 18: 1, 19: 2, 20: 2, 21: 2, 22: 2, 23: 1, 24: 1, 25: 1, 26: 1, 27: 1, 28: 1, 31: 2, 34: 1, 37: 1, 38: 1, 39: 1, 41: 2 };
+  const myOrders = (did = DID) => ((jget('orders', {}) || {})[String(did)] || []);
+  function setOrders(did, list) { const o = jget('orders', {}) || {}; if (list.length) o[String(did)] = list; else delete o[String(did)]; jset('orders', o); }
+  // Grąžina { field, building } veiksmus pagal užsakymus (arba { demolish:true }, jei pradėtas griovimas); įvykdytus išima
+  function orderAction(fields, builds, free) {
+    const list = myOrders(); if (!list.length) return {};
+    const out = {}, keep = [];
+    const at = slot => slot <= 18 ? (fields.find(f => +f.slot === +slot) || null) : (builds.find(b => +b.slot === +slot) || null);
+    for (const o of list) {
+      const cur = at(o.slot), eff = cur ? cur.lvl + (cur.uc ? 1 : 0) : 0, gidNow = cur ? (cur.gid || 0) : 0;
+      if (o.type === 'demo') {
+        if (!cur || !gidNow || cur.lvl === 0) { log('Užsakymas įvykdytas: nugriauta vieta', o.slot); continue; }
+        keep.push(o);
+        if (out.demolish || Date.now() < (vget('demoNext', 0) || 0)) continue;
+        if (((vget('blv', {}) || {})[15] || 0) < 10) { setStatus('griovimui reikia Gyvenamojo pastato 10 lygio'); continue; }
+        vset('demoNext', Date.now() + rand(4, 7) * 60000); vset('demoTarget', { slot: o.slot });
+        startChore('demolish', '/build.php?gid=15'); out.demolish = true;
+        continue;
+      }
+      if (gidNow && gidNow !== o.gid) { keep.push(o); if (o.type === 'new') setStatus(`užsakymas: vieta ${o.slot} užimta (${BNAME[gidNow] || gidNow}) – pirma nugriauk`); continue; }
+      if (eff >= o.to) { log('Užsakymas įvykdytas:', BNAME[o.gid] || o.gid, 'vieta', o.slot, 'lygis', eff); continue; }
+      keep.push(o);
+      const lane = o.slot <= 18 ? 'field' : 'building';
+      if (out[lane] || (cur && cur.uc) || !free[lane] || isSkipped('ord' + o.id)) continue;
+      out[lane] = gidNow
+        ? { lane, kind: 'upgrade', slot: o.slot, gid: o.gid, key: 'ord' + o.id, desc: `UŽSAKYMAS: ${BNAME[o.gid] || o.gid} → ${eff + 1} (iki ${o.to})` }
+        : { lane, kind: 'new', slot: o.slot, gid: o.gid, cat: BCAT[o.gid] || 1, key: 'ord' + o.id, desc: `UŽSAKYMAS: naujas ${BNAME[o.gid] || o.gid} (vieta ${o.slot})` };
+    }
+    if (keep.length !== list.length) setOrders(DID, keep);
+    return out;
+  }
+  function showOrders() {
+    const old = document.getElementById('abOrd'); if (old) { old.remove(); return; }
+    const vs = ownVillageList(); let cur = String(DID);
+    const box = document.createElement('div'); box.id = 'abOrd';
+    box.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:100000;background:#fffaf0;color:#222;border:2px solid #a63;border-radius:8px;padding:10px;max-height:80vh;overflow:auto;font:12px sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.4);min-width:480px';
+    const render = () => {
+      const bl = GM_getValue('bldList@' + cur, null) || [], fl = GM_getValue('fldList@' + cur, null) || [];
+      const all = [...fl.map(f => ({ ...f, slot: +f.slot })), ...bl].filter(x => x.gid);
+      const freeSlots = bl.filter(b => !b.gid && b.slot <= 38).map(b => b.slot);
+      const lst = myOrders(cur);
+      const nm = x => `${BNAME[x.gid] || 'gid ' + x.gid} ${x.lvl} lyg. (vieta ${x.slot})`;
+      box.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><b>Statybų užsakymai</b><button id="abOrX" style="border:0;background:#a63;color:#fff;border-radius:4px;padding:2px 8px;cursor:pointer">✕</button></div>
+        <div style="margin-bottom:6px">Kaimas: <select id="abOrV">${vs.map(v => `<option value="${v.did}"${v.did === cur ? ' selected' : ''}>${v.name}</option>`).join('')}</select></div>
+        ${!bl.length ? '<div style="color:#a22">Šio kaimo pastatų sąrašas dar nežinomas – skriptas jį sužinos, kai apsilankys šiame kaime (~10 min.).</div>' : ''}
+        <div style="font-weight:bold;margin:6px 0 3px">Laukia vykdymo (pirmiau už planą, eilės tvarka):</div>
+        ${lst.length ? lst.map((o, i) => `<div style="border-top:1px solid #eee;padding:2px 0">${i + 1}. ${o.type === 'demo' ? 'Nugriauti' : o.type === 'new' ? 'Pastatyti' : 'Kelti'} ${BNAME[o.gid] || o.gid} (vieta ${o.slot})${o.type !== 'demo' ? ' iki ' + o.to + ' lyg.' : ''} <button data-del="${o.id}" style="border:0;background:#a22;color:#fff;border-radius:3px;cursor:pointer">✕</button></div>`).join('') : '<div style="color:#555">nėra</div>'}
+        <div style="font-weight:bold;margin:10px 0 3px">Kelti esamą:</div>
+        <select id="abOrUp">${all.map(x => `<option value="${x.slot}|${x.gid}">${nm(x)}</option>`).join('')}</select> iki <input id="abOrUpL" type="number" min="1" max="20" value="10" style="width:45px"> lyg. <button id="abOrUpB">Pridėti</button>
+        <div style="font-weight:bold;margin:10px 0 3px">Pastatyti naują:</div>
+        <select id="abOrNw">${Object.entries(BCAT).map(([g]) => `<option value="${g}">${BNAME[g]}</option>`).join('')}</select> vietoje <select id="abOrNs">${freeSlots.map(sl => `<option value="${sl}">${sl}</option>`).join('') || '<option value="">laisvų nėra</option>'}</select> iki <input id="abOrNwL" type="number" min="1" max="20" value="1" style="width:45px"> lyg. <button id="abOrNwB">Pridėti</button>
+        <div style="font-weight:bold;margin:10px 0 3px">Nugriauti:</div>
+        <select id="abOrDm">${bl.filter(b => b.gid && ![16, 15].includes(b.gid)).map(x => `<option value="${x.slot}|${x.gid}">${nm(x)}</option>`).join('')}</select> <button id="abOrDmB">Pridėti</button>
+        <div style="color:#555;margin-top:8px">Griovimui reikia Gyvenamojo pastato 10 lygio; griaunama po lygį, kol nugriaunama visai. Pastatyti kitą toje vietoje: pirma „Nugriauti“, tada „Pastatyti naują“ (vieta atsiras sąraše, kai bus tuščia). Planas gali tą patį pastatą vėliau atstatyti, jei jis yra plane.</div>`;
+      box.querySelector('#abOrX').onclick = () => box.remove();
+      box.querySelector('#abOrV').onchange = e => { cur = e.target.value; render(); };
+      const add = o => { if (o.to) o.to = Math.min(o.to, o.gid === 23 ? 10 : 20); const l = myOrders(cur); l.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ...o }); setOrders(cur, l); log('Užsakymas pridėtas:', cur, JSON.stringify(o)); render(); };
+      box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { setOrders(cur, myOrders(cur).filter(o => o.id !== b.dataset.del)); render(); });
+      const up = box.querySelector('#abOrUpB'); if (up) up.onclick = () => { const [sl, g] = box.querySelector('#abOrUp').value.split('|').map(Number); if (sl) add({ type: 'up', slot: sl, gid: g, to: Math.max(1, +box.querySelector('#abOrUpL').value || 1) }); };
+      const nw = box.querySelector('#abOrNwB'); if (nw) nw.onclick = () => { const sl = +box.querySelector('#abOrNs').value; if (sl) add({ type: 'new', slot: sl, gid: +box.querySelector('#abOrNw').value, to: Math.max(1, +box.querySelector('#abOrNwL').value || 1) }); };
+      const dm = box.querySelector('#abOrDmB'); if (dm) dm.onclick = () => { const [sl, g] = (box.querySelector('#abOrDm').value || '').split('|').map(Number); if (sl) add({ type: 'demo', slot: sl, gid: g }); };
+    };
+    render(); document.body.appendChild(box);
   }
   function showMarket() {
     const old = document.getElementById('abMkt'); if (old) { old.remove(); return; }
@@ -4589,7 +4671,7 @@
     // KARO REŽIMAS: statybų nėra – tik kariai, reidai, turgus ir t. t. IŠIMTIS: grūdų balansas žemas/neigiamas – keliami TIK grūdų laukai (kad kariai nebadautų)
     const fcW = (() => { const e = document.getElementById('stockBarFreeCrop'); const v = e ? parseInt(clean(e.textContent).replace(/[^\d-]/g, ''), 10) : NaN; return isNaN(v) ? null : v; })();
     const cropOnly = !GM_getValue('buildOn', true) && fcW !== null && fcW < WAR_CROP_MIN;
-    if (!GM_getValue('buildOn', true) && !cropOnly) {
+    if (!GM_getValue('buildOn', true) && !cropOnly && !myOrders().length) {
       if (maybeChores()) return;
       setStatus('statybos išjungtos (karo režimas) – laukiu darbų');
       return scheduleNext(rand(3, 6));
@@ -4624,6 +4706,7 @@
     { const lv = {}; for (const b of builds) if (b.gid) lv[b.gid] = Math.max(lv[b.gid] || 0, b.lvl); vset('blv', lv); }
 
     const fields = readFields(document);
+    vset('bldList', builds.map(b => ({ slot: b.slot, gid: b.gid, lvl: b.lvl, uc: b.uc }))); vset('fldList', fields.map(f => ({ slot: +f.slot, gid: f.gid, lvl: f.lvl, uc: f.uc })));   // užsakymų langui
     if (!fields.length) { setStatus('NEPAVYKO perskaityti laukų – reikia pataisyti skriptą'); return; }
 
     const have = [1, 2, 3, 4].map(i => num(document.getElementById('l' + i)));
@@ -4638,7 +4721,9 @@
     if (saving) free.building = false;
 
     const d = decide(fields, builds, have, caps, free, blockedB);
-    if (cropOnly) {                                                        // karo režimas + mažai grūdų: tik žemiausias grūdų laukas
+    if (!GM_getValue('buildOn', true) && !cropOnly) { d.building = null; d.field = null; }   // karo režimas: tik užsakymai
+    { const oa = orderAction(fields, builds, free); if (oa.demolish) return; if (oa.field) d.field = oa.field; if (oa.building) d.building = oa.building; if (oa.field || oa.building) d.ordered = true; }
+    if (cropOnly && !d.ordered) {                                          // karo režimas + mažai grūdų: tik žemiausias grūdų laukas
       d.building = null;
       if (!(d.field && d.field.gid === 4)) {
         const cf = fields.filter(f => f.gid === 4 && !f.uc && !isSkipped('f' + f.slot)).sort((a, b) => a.lvl - b.lvl)[0];
