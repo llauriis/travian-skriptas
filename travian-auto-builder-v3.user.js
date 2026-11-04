@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.23
+// @version      20.24
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1997,35 +1997,41 @@
         const k = c.x + '|' + c.y;
         if (!info.free || !info.total) { done[k] = now + 60 * 60000; continue; }
         if (cagesOn && info.animals.some(a => CAGE_ANIMALS.includes(a.u))) { done[k] = now + 3 * 3600000; continue; }   // narvų taikinys – herojui
-        let D = 10, bad = false;
-        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { bad = true; break; } D += a.n * Math.max(st.d[0], st.d[1]); }
+        let D = 10, bad = false, ups = 0;
+        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { bad = true; break; } D += a.n * Math.max(st.d[0], st.d[1]); ups += a.n * st.up; }
         let n = 0;
         if (!bad) for (let m = Math.max(EO_GROUP, 2); m <= Math.min(avail, EI_CLEAR_WEAK_MAX); m++) {
           const x = Math.pow(D / (m * EI_ATTACK), 1.5), lossFrac = x / (1 + x);     // plėšimo nuostolis
           if (m * lossFrac < 0.3) { n = m; break; }                                // praktiškai 0 žuvusių
         }
         if (n && useEI) { send(c, n, `silpna oazė (${info.total} gyv.)`); return; }
-        // KARIAI BE HEROJAUS: EI + imperionai + legionieriai (pėstininkai – tik iki ARMY_MAX_MIN kelio). Be herojaus premijos už gyvūnus nėra –
-        // grobis tik oazės resursai (paskutinio plėšimo ar ~OASIS_STOCK_GUESS). Siunčiam, jei grobis − žuvusių kaina ≥ ½ žuvusių kainos
+        // KARIAI BE HEROJAUS: EI + imperionai + legionieriai (pėstininkai – tik iki ARMY_MAX_MIN kelio). Premija už nukautus gyvūnus (~160 už išlaikymo vnt.)
+        // į kuprinę ateina IR BE HEROJAUS (patikrinta ataskaitoje) + oazės resursai. Siunčiam, jei (grobis + premija) − žuvusių kaina ≥ ½ žuvusių kainos
         if (!bad) {
-          const units = { t5: useEI ? ei : 0, t3: c.dist * 60 / (7 * TROOP_SPEED) <= ARMY_MAX_MIN ? (tr.imp || 0) : 0, t1: c.dist * 60 / (6 * TROOP_SPEED) <= ARMY_MAX_MIN ? (tr.armyLeg || 0) : 0 };
-          const att = Object.entries(units).reduce((a2, [u, m]) => a2 + m * UNIT_ATT_R[u], 0);
-          if (att > D * OASIS_SAFETY) {
+          const all = { t5: useEI ? ei : 0, t3: c.dist * 60 / (7 * TROOP_SPEED) <= ARMY_MAX_MIN ? (tr.imp || 0) : 0, t1: c.dist * 60 / (6 * TROOP_SPEED) <= ARMY_MAX_MIN ? (tr.armyLeg || 0) : 0 };
+          // trys sudėtys: visi / tik pėstininkai (pigesni žuvusieji) / tik EI – imama pelningiausia
+          const combos = [all, { t5: 0, t3: all.t3, t1: all.t1 }, { t5: all.t5, t3: 0, t1: 0 }].filter(u => u.t5 + u.t3 + u.t1 > 0).filter((u, i2, arr) => arr.findIndex(o => JSON.stringify(o) === JSON.stringify(u)) === i2);
+          let bestA = null;
+          for (const units of combos) {
+            const att = Object.entries(units).reduce((a2, [u, m]) => a2 + m * UNIT_ATT_R[u], 0);
+            if (att <= D * OASIS_SAFETY) continue;
             const x = Math.pow(D * OASIS_SAFETY / att, 1.5), lossFrac = x / (1 + x);
             const deaths = Object.fromEntries(Object.entries(units).map(([u, m]) => [u, Math.round(m * lossFrac)]));
             const lost = Object.entries(deaths).reduce((a2, [u, d2]) => a2 + d2 * UNIT_COST_R[u], 0);
             const carry = (units.t5 - deaths.t5) * 100 + (units.t3 - deaths.t3 + units.t1 - deaths.t1) * 50;
             const lk = loot[k], stock = lk && lk.got ? Math.max(lk.got, OASIS_STOCK_GUESS) : OASIS_STOCK_GUESS;
-            const gain = Math.min(carry, stock), ok2 = gain - lost >= 0.5 * lost;
-            log(`Oazė ${k} (${info.total} gyv.) be herojaus: EI ${units.t5}, imper. ${units.t3}, legion. ${units.t1} – žus ${JSON.stringify(deaths)} (${lost}), grobis ~${gain} → ${ok2 ? 'SIUNČIU' : 'neapsimoka'}`);
-            if (ok2) {
-              const troops = {}; for (const [u, m] of Object.entries(units)) if (m) troops[u] = m;
-              done[k] = now + rand(...EO_COOLDOWN) * 60000; jset('eoDone', done); sent[k] = now; jset('eoSent', sent);
-              jset('raidTarget', { x: c.x, y: c.y, troops, name: `oazė be herojaus (${info.total} gyv.)`, player: 'oazė' });
-              setStatus(`oazė ${k}: kariai be herojaus (${info.total} gyv.)`);
-              startChore('raidSend', `/build.php?id=39&gid=16&tt=2&x=${c.x}&y=${c.y}`);
-              return;
-            }
+            const killed = 1 / (1 + Math.pow(D / att, 1.5)), bonus = Math.round(OASIS_BONUS_PER_UP * ups * killed);
+            const gain = Math.min(carry, stock) + bonus, profit = gain - lost;
+            log(`Oazė ${k} (${info.total} gyv.) be herojaus: EI ${units.t5}, imper. ${units.t3}, legion. ${units.t1} – žus ${JSON.stringify(deaths)} (${lost}), grobis ~${gain - bonus} + premija ~${bonus} → ${profit >= 0.5 * lost ? 'tinka' : 'neapsimoka'}`);
+            if (profit >= 0.5 * lost && (!bestA || profit > bestA.profit)) bestA = { units, profit, info };
+          }
+          if (bestA) {
+            const troops = {}; for (const [u, m] of Object.entries(bestA.units)) if (m) troops[u] = m;
+            done[k] = now + rand(...EO_COOLDOWN) * 60000; jset('eoDone', done); sent[k] = now; jset('eoSent', sent);
+            jset('raidTarget', { x: c.x, y: c.y, troops, name: `oazė be herojaus (${info.total} gyv.)`, player: 'oazė' });
+            setStatus(`oazė ${k}: kariai be herojaus (${info.total} gyv.), pelnas ~${Math.round(bestA.profit)}`);
+            startChore('raidSend', `/build.php?id=39&gid=16&tt=2&x=${c.x}&y=${c.y}`);
+            return;
           }
         }
         done[k] = now + rand(90, 150) * 60000;                                     // per stipri – herojui
