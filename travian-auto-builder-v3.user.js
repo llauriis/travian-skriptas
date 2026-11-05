@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.38
+// @version      20.39
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -211,8 +211,7 @@
   const TROOP_SPEED = ({ 1: 1, 2: 2, 3: 2, 5: 3, 10: 4 })[+((location.hostname.match(/\.x(\d+)\./) || [])[1] || 1)] || 1;
   const FL_SPEED_LEG = 6 * TROOP_SPEED, FL_SPEED_EI = 14 * TROOP_SPEED;   // laukeliai per valandą
   const FL_PARTIAL_COOLDOWN_H = 2;   // paskutinis reidas ne pilnu maišu → tos oazės nepulti tiek valandų
-  const FL_MAX_SLOTS = 100;          // (Aukso klubo sąrašo riba – 100)
-  const FL_REACH_MAX = 30;           // legionierių tuščių oazių paieška – plečiama iki tiek laukelių          // kiek daugiausia oazių laikyti sąraše
+  const FL_MAX_SLOTS = 60;           // kiek daugiausia oazių laikyti sąraše
   const FL_SIZE_MAX = 40;           // pilnu maišu grįžus – grupė į tą oazę auga ×1,5 (iki tiek); menkas grobis – mažėja
   const FL_EVERY = [5, 9];           // kas kiek min. tikrinti: grįžę kariai (≥2) iškart vėl išsiunčiami, nelaukiant visų           // tik artimos – kitaip kiti aplenkia
   const EO_EVERY = [6, 12];         // kas kiek min. tikrinti, ar kariai namie
@@ -1669,10 +1668,10 @@
     if (details) log(`Ataskaitos: atidaryta ${details}, mūsų puolimų/žvalgybų ${done}`);
   }
   // Grobio dydis iš žvalgybos: siunčiam tiek EI, kad viską išneštų vienu kartu (EI neša 100); per mažai grobio – neapsimoka
-  const EI_CARRY = 100, STOCK_MARGIN = 1.08, RAID_MIN_STOCK = 50, CRANNY_LOW = 50;   // parneša bent 50 – verta (jei niekas nežūsta)
+  const EI_CARRY = 100, STOCK_MARGIN = 1.08, RAID_MIN_STOCK = 50, CRANNY_LOW = 50;   // KAIMAI: parneša bent 50 be nuostolių – verta
   const crannyBarred = (r, f) => !!(r && (r.zeroN || 0) >= 2 && (f.pop || 0) === (r.zeroPop || 0));   // slėptuvės slepia viską, kaimas nesikeičia
   // Apsimokėjimas: net be gynėjų kaimas turi ~250 bazinės gynybos – kiekvienas reidas kainuoja ~1 EI (≈1410 resursų). Pulti tik jei grobis ≥ RAID_WORTH × nuostolis
-  const EI_COST = 1410, BASE_VDEF = 250, RAID_WORTH = 1;     // grobis turi būti didesnis už žuvusiųjų kainą (minusinių fermų nepuolam)
+  const EI_COST = 1410, BASE_VDEF = 250, RAID_WORTH = 1;     // KAIMAI: su nuostoliais – tik jei grobis didesnis už žuvusiųjų kainą (minusinių nepuolam)
   // Žvalgas žuvo: taikinys išimtas 24 val.; po to pulti/žvalgyti vėl tik jei gyventojų skaičius nepadidėjo (kyla – aktyvus žaidėjas su žvalgų gynyba – paliekam)
   // Mažiausias EI kiekis, su kuriuo reidas į šį taikinį apsimoka (0 – neapsimoka niekada)
   // DIDESNĖ GRUPĖ – MAŽIAU ŽUVUSIŲ: plėšime žūsta n·x/(1+x), x = (D/(n·puolimas))^1.5 → ∝ 1/√n; žaidimas apvalina, todėl pakankamai didelė grupė
@@ -1889,7 +1888,6 @@
   }
   // ---- LEGIONIERIŲ (ir imperionų) ARMIJA į oazes SU GYVŪNAIS, be herojaus ir be EI: tuščių oazių mažai (gyvūnai atsiranda greitai),
   //      o šimtai legionierių stovėjo namie, nes ši paieška anksčiau vykdavo tik kai namie buvo EI ----
-  const LEG_REACH0 = ARMY_NOHERO_MIN / 60 * 6 * 2, LEG_REACH_MAX = 30;   // paieškos spindulys (laukeliais): nieko neradus – plečiamas iki MAX
   const LEG_ARMY_MIN = 30;           // tiek pėstininkų namie – verta ieškoti oazės su gyvūnais
   const maxLeft = (tr, n) => (tr.imp || 0) + (tr.armyLeg || 0) - n;
   function legArmyChore() {
@@ -1899,7 +1897,7 @@
     if (leg + imp < LEG_ARMY_MIN) return false;
     vset('legArmyNext', Date.now() + rand(10, 18) * 60000);
     const v = villageXY(); if (!v) return false;
-    jset('eoTroops', { leg: 0, ei: 0, legArmy: true, armyLeg: leg, imp, reach: vget('legReach', LEG_REACH0) });
+    jset('eoTroops', { leg: 0, ei: 0, legArmy: true, armyLeg: leg, imp });
     startChore('eoScan', `/karte.php?x=${v.x}&y=${v.y}`);
     return true;
   }
@@ -1979,14 +1977,14 @@
     // „far“ (laisvi EI): žiedas už legionierių zonos iki EI 40 min. ribos; kitaip – artimos
     const minD = tr.far ? FL_MAX_MIN / 60 * FL_SPEED_LEG : 0;
     // laisvi EI eina vis toliau: iki EI_FAR_MAX_MIN kelio (artimesnės vis tiek pirmiau – rikiuojama pagal atstumą ir grobį)
-    const maxD = tr.far ? EI_FAR_MAX_MIN / 60 * FL_SPEED_EI : tr.legArmy ? Math.max(EO_MAX_DIST, tr.reach || 0) : EO_MAX_DIST;
+    const maxD = tr.far ? EI_FAR_MAX_MIN / 60 * FL_SPEED_EI : EO_MAX_DIST;
     // toliau (iki EI_FAR_EXT_MIN) – TIK kai visos oazės iki maxD jau plėštos / netinka, o EI dar liko
     const extD = tr.far ? EI_FAR_EXT_MIN / 60 * FL_SPEED_EI : maxD;
     let tiles = [];
     if (tr.far) tiles = await farTiles(v, extD);                 // didelė zona – iš talpyklos (žemėlapis skenuojamas kas ~1,5 val.)
     else {
       const wins = [];
-      for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) { const dx = i * 8, dy = j * 9; if (Math.hypot(dx, dy) <= maxD + 5) wins.push([v.x + dx, v.y + dy]); }
+      for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) { const dx = i * 8, dy = j * 9; if (Math.hypot(dx, dy) <= maxD + 5) wins.push([v.x + dx, v.y + dy]); }
       try {
         for (const [px, py] of wins) {
           const pp = await api('/api/v1/map/position', { data: { x: px, y: py, zoomLevel: 1, ignorePositions: [] } });
@@ -2042,7 +2040,7 @@
       return false;
     };
     if (tr.legArmy) {                                                     // PĖSTININKŲ ARMIJA: oazės su gyvūnais iki ARMY_NOHERO_MIN kelio
-      const reach = maxD;                                                 // plečiamas, jei arti nieko neranda
+      const reach = ARMY_NOHERO_MIN / 60 * 6 * TROOP_SPEED;               // legionierių greitis 6
       const withA = tiles.filter(t => /\{k\.fo\}/.test(t.title || '') && /\{k\.animals\}/.test(String(t.text || '')))
         .map(toC).filter(c => c.dist <= reach && keyOk(c)).sort((a, b) => a.dist - b.dist);
       let best = null, looked = 0;
@@ -2065,7 +2063,7 @@
           const lost = dA * UNIT_COST_R.t3 + dL * UNIT_COST_R.t1, carry = (n - dA - dL) * 50;
           const bonus = Math.round(OASIS_BONUS_PER_UP * ups / (1 + Math.pow(DI / att, 1.5)));
           const profit = Math.min(carry, stock) + bonus - lost;
-          if (profit <= 0 || Math.min(carry, stock) + bonus < RAID_MIN_STOCK) continue;   // parneša bent 50 ir neminusinė
+          if (profit <= 0 || profit < 0.5 * lost) continue;
           if (!bo || profit > bo.profit) bo = { troops: { ...(a ? { t3: a } : {}), ...(l ? { t1: l } : {}) }, n, lost, bonus, profit, deaths: dA + dL };
         }
         if (!bo) { done[k] = now + rand(60, 120) * 60000; continue; }
@@ -2073,12 +2071,7 @@
         if (!best || bo.profit / (1 + c.dist / 10) > best.bo.profit / (1 + best.c.dist / 10)) best = { c, bo, info };
       }
       jset('eoDone', done);
-      if (!best) {                                                          // arti nieko – kitą kartą žiūrim toliau
-        const nr = Math.min(LEG_REACH_MAX, reach + 3); vset('legReach', nr);
-        if (nr > reach) vset('legArmyNext', Date.now() + rand(2, 4) * 60000);
-        setStatus(`pėstininkų armija: iki ${Math.round(reach)} lauk. tinkamų nėra – plečiu iki ${Math.round(nr)}`); return finishChore();
-      }
-      if (best.c.dist < reach - 8 && reach > LEG_REACH0) vset('legReach', Math.max(LEG_REACH0, reach - 1));   // arti vėl yra – spindulys po truputį mažėja
+      if (!best) { setStatus('pėstininkų armija: tinkamų oazių su gyvūnais nėra'); return finishChore(); }
       const k = best.c.x + '|' + best.c.y;
       done[k] = now + rand(...EO_COOLDOWN) * 60000; jset('eoDone', done); sent[k] = now; jset('eoSent', sent);
       if (maxLeft(tr, best.bo.n) >= LEG_ARMY_MIN) vset('legArmyNext', Date.now() + rand(1, 3) * 60000);   // liko karių – netrukus kita oazė
@@ -2124,8 +2117,8 @@
             const lk = loot[k], stock = lk && lk.got ? Math.max(lk.got, OASIS_STOCK_GUESS) : OASIS_STOCK_GUESS;
             const killed = 1 / (1 + Math.pow(Du / att, 1.5)), bonus = Math.round(OASIS_BONUS_PER_UP * ups * killed);
             const gain = Math.min(carry, stock) + bonus, profit = gain - lost;
-            log(`Oazė ${k} (${info.total} gyv.) be herojaus: EI ${units.t5}, imper. ${units.t3}, legion. ${units.t1} – žus ${JSON.stringify(deaths)} (${lost}), grobis ~${gain - bonus} + premija ~${bonus} → ${profit > 0 && gain >= RAID_MIN_STOCK ? 'tinka' : 'neapsimoka'}`);
-            if (profit > 0 && gain >= RAID_MIN_STOCK && (!bestA || profit > bestA.profit)) bestA = { units, profit, info };
+            log(`Oazė ${k} (${info.total} gyv.) be herojaus: EI ${units.t5}, imper. ${units.t3}, legion. ${units.t1} – žus ${JSON.stringify(deaths)} (${lost}), grobis ~${gain - bonus} + premija ~${bonus} → ${profit >= 0.5 * lost ? 'tinka' : 'neapsimoka'}`);
+            if (profit >= 0.5 * lost && (!bestA || profit > bestA.profit)) bestA = { units, profit, info };
           }
           if (bestA) {
             const troops = {}; for (const [u, m] of Object.entries(bestA.units)) if (m) troops[u] = m;
@@ -2318,8 +2311,7 @@
     const per = mode === 'ei' ? FL_EI : FL_LEG;
     const units = { t1: 0, t2: 0, t3: 0, t4: 0, t5: 0, t6: 0, t7: 0, t8: 0, t9: 0, t10: 0, ...per };
     const speed = mode === 'ei' ? FL_SPEED_EI : FL_SPEED_LEG;
-    const flBaseR = FL_MAX_MIN / 60 * FL_SPEED_LEG;
-    const maxDist = mode === 'ei' ? FL_MAX_MIN_EI / 60 * FL_SPEED_EI : Math.max(flBaseR, vget('flReach', flBaseR));   // legionieriams – plečiamas, kai lieka nedirbančių
+    const maxDist = mode === 'ei' ? FL_MAX_MIN_EI / 60 * FL_SPEED_EI : FL_MAX_MIN / 60 * FL_SPEED_LEG;
     const modeChanged = GM_getValue('flLastMode', '') !== mode;
     const v = villageXY() || vget('xy', null);
     const now = Date.now();
@@ -2346,7 +2338,7 @@
         const have = new Set(slots.map(s => s.x + '|' + s.y));
         let tiles = [];
         const wins = [];
-        for (let i = -4; i <= 4; i++) for (let j = -4; j <= 4; j++) { const dx = i * 8, dy = j * 9; if (Math.hypot(dx, dy) <= maxDist + 5) wins.push([v.x + dx, v.y + dy]); }
+        for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++) { const dx = i * 8, dy = j * 9; if (Math.hypot(dx, dy) <= maxDist + 5) wins.push([v.x + dx, v.y + dy]); }
         for (const [px, py] of wins) {
           const pp = await api('/api/v1/map/position', { data: { x: px, y: py, zoomLevel: 1, ignorePositions: [] } });
           tiles = tiles.concat(pp.tiles || []); await sleep(rand(300, 800));
@@ -2380,13 +2372,6 @@
       }
       jset('flBad', bad);
       jset('flSize', sizes);
-      if (mode === 'leg') {                                                  // daug legionierių liko be darbo – kitą kartą oazių ieškoma toliau
-        const avail0 = GM_getValue('flAvail', 0) || 0, leftShare = avail0 ? budget / avail0 : 0;
-        let rr = Math.max(flBaseR, vget('flReach', flBaseR));
-        if (leftShare > 0.4 && rr < FL_REACH_MAX) { rr = Math.min(FL_REACH_MAX, rr + 3); GM_setValue('flScanNext', 0); log(`Fermų sąrašas: liko ${budget} legionierių be darbo – oazių ieškosiu iki ${Math.round(rr)} lauk.`); }
-        else if (leftShare < 0.1 && rr > flBaseR) rr = Math.max(flBaseR, rr - 1);
-        vset('flReach', rr);
-      }
       const pick = new Map(chosen.map(c => [c.id, c.n]));
       const upd = slots.filter(sl => pick.has(sl.id) || sl.active || modeChanged)       // parinktos – visada (grupės dydis galėjo pasikeisti)
         .map(sl => ({ id: sl.id, listId, x: sl.x, y: sl.y, units: pick.has(sl.id) ? { ...units, [uKey]: pick.get(sl.id) } : units, active: pick.has(sl.id) }));
