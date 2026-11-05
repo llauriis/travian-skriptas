@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.36
+// @version      20.37
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1581,8 +1581,21 @@
     } catch (e) { return null; }
   }
   const REP_DETAIL_MAX = 30;                                            // tiek ataskaitų atidaroma per vieną skaitymą (likusios – kitą kartą)
+  // Ataskaitų skaitymas trunka (daug užklausų), o tuo metu plėšimai/žvalgai keičia tą patį „raids“ – rašant atgal NEPERRAŠYTI jų pakeitimų:
+  // imami tik šio skaitymo pakeisti taikiniai, laiko žymos (last, scouted, block…) – didesnė iš abiejų
+  function raidsMerge(raids, orig) {
+    const fresh = jget('raids', {}) || {};
+    for (const k of Object.keys(raids)) {
+      if (JSON.stringify(raids[k]) === orig[k]) continue;                   // šis skaitymas nekeitė
+      const m = { ...(fresh[k] || {}), ...raids[k] };
+      for (const f of ['last', 'scouted', 'block', 'deadUntil', 'lastSent']) { const a = (fresh[k] || {})[f] || 0, b = raids[k][f] || 0; if (a || b) m[f] = Math.max(a, b); }
+      fresh[k] = m;
+    }
+    jset('raids', fresh);
+  }
   async function readRaidReports(rowsIn) {
     const raids = jget('raids', {}), seen = jget('repSeen', []);
+    const rOrig = Object.fromEntries(Object.entries(raids).map(([k, v]) => [k, JSON.stringify(v)]));
     repCache = new Map();
     let details = 0, done = 0;
     const rows = [...rowsIn].reverse();                                  // seniausios pirma – naujesnė informacija perrašo senesnę
@@ -1651,7 +1664,7 @@
       }
       raids[k] = st;
     }
-    jset('raids', raids); jset('repSeen', seen.slice(-600));
+    raidsMerge(raids, rOrig); jset('repSeen', seen.slice(-600));
     if (details) log(`Ataskaitos: atidaryta ${details}, mūsų puolimų/žvalgybų ${done}`);
   }
   // Grobio dydis iš žvalgybos: siunčiam tiek EI, kad viską išneštų vienu kartu (EI neša 100); per mažai grobio – neapsimoka
@@ -1870,6 +1883,21 @@
     startChore('eoScan', `/karte.php?x=${v.x}&y=${v.y}`);
     return true;
   }
+  // ---- LEGIONIERIŲ (ir imperionų) ARMIJA į oazes SU GYVŪNAIS, be herojaus ir be EI: tuščių oazių mažai (gyvūnai atsiranda greitai),
+  //      o šimtai legionierių stovėjo namie, nes ši paieška anksčiau vykdavo tik kai namie buvo EI ----
+  const LEG_ARMY_MIN = 30;           // tiek pėstininkų namie – verta ieškoti oazės su gyvūnais
+  const maxLeft = (tr, n) => (tr.imp || 0) + (tr.armyLeg || 0) - n;
+  function legArmyChore() {
+    if (!MILITARY_ROLES.includes(ROLE) || !OASIS_ARMY || Date.now() < (vget('legArmyNext', 0) || 0)) return false;
+    if (attackInMin() < 30 || defHome()) return false;
+    const leg = homeTroops(/Legionier\S*|Legionnaire\S*/), imp = homeTroops(/(?:Imperion\S*|Imperian\S*)/);
+    if (leg + imp < LEG_ARMY_MIN) return false;
+    vset('legArmyNext', Date.now() + rand(10, 18) * 60000);
+    const v = villageXY(); if (!v) return false;
+    jset('eoTroops', { leg: 0, ei: 0, legArmy: true, armyLeg: leg, imp });
+    startChore('eoScan', `/karte.php?x=${v.x}&y=${v.y}`);
+    return true;
+  }
   function emptyOasisChore() {                                   // sinchroninis: tik nusprendžia ir nueina į žemėlapį
     if (!MILITARY_ROLES.includes(ROLE)) return false;
     if (!EMPTY_OASIS_RAID || Date.now() < (vget('eoNext', 0) || 0)) return false;
@@ -1962,7 +1990,7 @@
         }
       } catch (e) { return finishChore(); }
     }
-    const loot = useEI ? await lastOasisLoot() : {};             // paskutinio plėšimo grobis kiekvienoje oazėje (iš ataskaitų sąrašo)
+    const loot = useEI || tr.legArmy ? await lastOasisLoot() : {};             // paskutinio plėšimo grobis kiekvienoje oazėje (iš ataskaitų sąrašo)
     const seen = new Set();
     const sent = jget('eoSent', {});
     // pakartotinis puolimas: paskutinė banga grįžo su PILNU maišu (ataskaita naujesnė už siuntimą) – oazė tinka iškart, nelaukiant pertraukos
@@ -2008,6 +2036,46 @@
       }
       return false;
     };
+    if (tr.legArmy) {                                                     // PĖSTININKŲ ARMIJA: oazės su gyvūnais iki ARMY_NOHERO_MIN kelio
+      const reach = ARMY_NOHERO_MIN / 60 * 6 * TROOP_SPEED;               // legionierių greitis 6
+      const withA = tiles.filter(t => /\{k\.fo\}/.test(t.title || '') && /\{k\.animals\}/.test(String(t.text || '')))
+        .map(toC).filter(c => c.dist <= reach && keyOk(c)).sort((a, b) => a.dist - b.dist);
+      let best = null, looked = 0;
+      for (const c of withA) {
+        if (looked >= 8) break; looked++;
+        await sleep(rand(700, 1600));
+        const info = await tileAnimals(c.x, c.y), k = c.x + '|' + c.y;
+        if (!info.free || !info.total) { done[k] = now + 60 * 60000; continue; }
+        let DI = 10, ups = 0, bad = false;
+        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { bad = true; break; } DI += a.n * st.d[0]; ups += a.n * st.up; }
+        if (bad) { done[k] = now + 3 * 3600000; continue; }
+        const lk = loot[k], stock = lk && lk.got ? Math.max(lk.got, OASIS_STOCK_GUESS) : OASIS_STOCK_GUESS;
+        // grupės dydis: imperionai pirmiau, tada legionieriai; renkamas didžiausias pelnas, lygiu atveju – mažesnė grupė (kiti – į kitą oazę)
+        const maxN = (tr.imp || 0) + (tr.armyLeg || 0);
+        let bo = null;
+        for (let n = 10; n <= maxN; n += n < 60 ? 5 : 10) {
+          const a = Math.min(tr.imp || 0, n), l = n - a, att = a * UNIT_ATT_R.t3 + l * UNIT_ATT_R.t1, D = DI * OASIS_SAFETY;
+          if (att <= D) continue;
+          const x = Math.pow(D / att, 1.5), f = x / (1 + x), dA = Math.round(a * f), dL = Math.round(l * f);
+          const lost = dA * UNIT_COST_R.t3 + dL * UNIT_COST_R.t1, carry = (n - dA - dL) * 50;
+          const bonus = Math.round(OASIS_BONUS_PER_UP * ups / (1 + Math.pow(DI / att, 1.5)));
+          const profit = Math.min(carry, stock) + bonus - lost;
+          if (profit <= 0 || profit < 0.5 * lost) continue;
+          if (!bo || profit > bo.profit) bo = { troops: { ...(a ? { t3: a } : {}), ...(l ? { t1: l } : {}) }, n, lost, bonus, profit, deaths: dA + dL };
+        }
+        if (!bo) { done[k] = now + rand(60, 120) * 60000; continue; }
+        log(`Oazė ${k} (${info.total} gyv., ${c.dist.toFixed(1)} lauk.) pėstininkų armija: ${bo.n} (žus ${bo.deaths}, ${bo.lost} res.), premija ~${bo.bonus}, pelnas ~${bo.profit}`);
+        if (!best || bo.profit / (1 + c.dist / 10) > best.bo.profit / (1 + best.c.dist / 10)) best = { c, bo, info };
+      }
+      jset('eoDone', done);
+      if (!best) { setStatus('pėstininkų armija: tinkamų oazių su gyvūnais nėra'); return finishChore(); }
+      const k = best.c.x + '|' + best.c.y;
+      done[k] = now + rand(...EO_COOLDOWN) * 60000; jset('eoDone', done); sent[k] = now; jset('eoSent', sent);
+      if (maxLeft(tr, best.bo.n) >= LEG_ARMY_MIN) vset('legArmyNext', Date.now() + rand(1, 3) * 60000);   // liko karių – netrukus kita oazė
+      jset('raidTarget', { x: best.c.x, y: best.c.y, troops: best.bo.troops, name: `oazė – pėstininkų armija (${best.info.total} gyv.)`, player: 'oazė' });
+      setStatus(`oazė ${k}: ${best.bo.n} pėstininkų (${best.info.total} gyv.), pelnas ~${best.bo.profit}`);
+      return startChore('raidSend', `/build.php?id=39&gid=16&tt=2&x=${best.c.x}&y=${best.c.y}`);
+    }
     if (await tryEmpty(cands, 'tuščia oazė')) return;
     // Tuščių neliko – EI išvalo SILPNAS oazes (keli žvėreliai), kai prognozė – nežūsta nė vienas; po to jas plėšia ir legionierių sąrašas
     if ((useEI || (tr.armyLeg || 0) + (tr.imp || 0) > 0) && EI_CLEAR_WEAK) {
@@ -2970,6 +3038,7 @@
     GM_setValue('allyRepNext', Date.now() + rand(...ALLY_REP_EVERY) * 60000);
     try {
       const seen = jget('allyRepSeen', []), raids = jget('raids', {}), farms = jget('farms', {});
+      const rOrigA = Object.fromEntries(Object.entries(raids).map(([k, v]) => [k, JSON.stringify(v)]));
       const v = vget('xy', null);
       let details = 0, added = 0, intel = 0;
       // Sąraše (patikrinta): „Žaidėjas užpuolė reidu / atakavo / ištyrė Taikinys – laikas“. „Gamta“ – oazės, „Natars“ – natarai: praleidžiam
@@ -3007,7 +3076,7 @@
           await sleep(rand(400, 1000));
         }
       }
-      jset('raids', raids); jset('farms', farms); jset('allyRepSeen', seen.slice(-600));
+      raidsMerge(raids, rOrigA); jset('farms', farms); jset('allyRepSeen', seen.slice(-600));
       if (details) log(`Aljanso ataskaitos: perskaityta ${details}, gynyba sužinota ${intel}, fermų pažymėta ${added}`);
     } catch (e) { log('Aljanso ataskaitų klaida:', e && e.message); }
   }
@@ -4105,7 +4174,8 @@
     const RR = [
       ['raid', () => raidChore()],
       ['fl', () => FARM_LIST_MODE ? farmListChore() : emptyOasisChore()],
-      ['eiIdle', () => FARM_LIST_MODE && eiIdleOasisChore()],              // laisvi EI (kol nėra žaidėjų fermų) – tolimesnės oazės
+      ['eiIdle', () => FARM_LIST_MODE && eiIdleOasisChore()],
+      ['legArmy', () => legArmyChore()],                                  // legionierių armija į oazes su gyvūnais              // laisvi EI (kol nėra žaidėjų fermų) – tolimesnės oazės
       ['supply', () => supplyChore()], ['auc', () => aucChore()], ['demo', () => demolishChore()], ['trade', () => tradeChore()],
       ['bal', () => balanceChore()], ['train', () => trainChore()], ['farm', () => farmChore()], ['site', () => siteChore()],
       ['oasis', () => oasisTurn() && oasisChore()],
