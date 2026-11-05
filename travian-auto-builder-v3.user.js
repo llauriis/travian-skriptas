@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.44
+// @version      20.45
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -585,7 +585,31 @@
   const vset = (k, v) => GM_setValue(vkey(k), v);
 
   let statusEl;
-  function setStatus(t) { if (statusEl) statusEl.textContent = `[${ROLE} #${DID}] ${t}`; log(ROLE, DID, t); }
+  function setStatus(t) { if (statusEl) statusEl.textContent = `[${ROLE} #${DID}] ${t}`; log(ROLE, DID, t); actLog(t); }
+  // VEIKSMŲ ŽURNALAS: kiekviena būsena ir puslapis su laiku (paskutiniai 400) – matyti, kada ir kodėl skriptas stovėjo
+  function actLog(t) {
+    try {
+      const a = jget('actLog', []) || [], last = a[a.length - 1];
+      if (last && last.s === t && last.d === String(DID)) { last.n = (last.n || 1) + 1; last.e = Date.now(); }
+      else a.push({ t: Date.now(), d: String(DID), s: String(t).slice(0, 160) });
+      jset('actLog', a.slice(-400));
+    } catch (e) {}
+  }
+  function showActLog() {
+    const old = document.getElementById('abAct'); if (old) { old.remove(); return; }
+    const a = jget('actLog', []) || [], vs = ownVillageList(), vn = d => ((vs.find(v => v.did === d) || {}).name) || d;
+    const rows = [];
+    for (let i = a.length - 1; i >= 0 && rows.length < 150; i--) {
+      const e = a[i], prev = a[i - 1], endPrev = prev ? (prev.e || prev.t) : 0, gap = prev ? (e.t - endPrev) / 60000 : 0;
+      rows.push(`<div style="border-top:1px solid #eee"><b>${hhmm(e.t)}</b> ${vn(e.d)}: ${e.s.replace(/</g, '&lt;')}${e.n > 1 ? ` <span style="color:#777">(×${e.n}, iki ${hhmm(e.e)})</span>` : ''}</div>`);
+      if (gap >= 15) rows.push(`<div style="background:#fdd;color:#900;padding:2px">⚠ ${Math.round(gap)} min. TYLA (${hhmm(endPrev)}–${hhmm(e.t)}): skriptas nieko nedarė${/pertrauka|pauzė|SUSTABDYTAS/.test((prev || {}).s || '') ? ` – priežastis eilutėje žemiau („${prev.s.slice(0, 40)}“)` : ' – naršyklė/kompiuteris miegojo, skirtukas buvo sustabdytas ar uždarytas'}</div>`);
+    }
+    const box = document.createElement('div'); box.id = 'abAct';
+    box.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:100000;background:#fffaf0;color:#222;border:2px solid #555;border-radius:8px;padding:10px;max-height:80vh;overflow:auto;font:12px sans-serif;box-shadow:0 4px 20px rgba(0,0,0,.4);min-width:480px;max-width:90vw';
+    box.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:6px"><b>Veiksmų žurnalas (naujausi viršuje)</b><button id="abActX" style="border:0;background:#555;color:#fff;border-radius:4px;cursor:pointer">✕</button></div>${rows.join('') || 'dar tuščia'}`;
+    document.body.appendChild(box);
+    document.getElementById('abActX').onclick = () => box.remove();
+  }
 
   function addUI() {
     const wrap = document.createElement('div');
@@ -706,6 +730,10 @@
     bE.textContent = `Eiga: ${jget('progLog', []).length} įrašų (atsisiųsti)`;
     bE.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#555';
     bE.onclick = exportProgress;
+    const bLog = document.createElement('button');
+    bLog.textContent = 'Veiksmų žurnalas';
+    bLog.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#555';
+    bLog.onclick = showActLog;
     const bA = document.createElement('button');
     const paintA = () => {
       const m = GM_getValue('aucMode', 'test');
@@ -735,7 +763,7 @@
     bH.textContent = (() => { const c = hc(); return `Karžygys: oazės nuo ${c.oasisMin} %, nuotykiai ${c.adv ? 'nuo ' + c.advMin + ' %' : 'IŠJ.'}`; })();
     bH.style.cssText = 'padding:4px 10px;color:#fff;border:0;border-radius:6px;font-weight:bold;cursor:pointer;display:block;margin-top:3px;font-size:11px;background:#7a4';
     bH.onclick = showHero;
-        wrap.append(b, bB, bOr, bH, bD, bSt, b2, bK, b3, b4, b5, b6, b7, b8, b9, bA, bAL, bMk, bN, bE, statusEl);
+        wrap.append(b, bB, bOr, bH, bD, bSt, b2, bK, b3, b4, b5, b6, b7, b8, b9, bA, bAL, bMk, bN, bE, bLog, statusEl);
     document.body.appendChild(wrap);
   }
 
@@ -5227,6 +5255,7 @@
   }
 
   addUI();
+  actLog('puslapis ' + location.pathname + (enabled() ? '' : ' (skriptas SUSTABDYTAS – STOP)'));
   // Naujoko apsauga – pabaiga nuskaitoma automatiškai iš užrašo „Dar turite 21:19:48 val. naujoko apsaugos“ (nieko įrašinėti nereikia)
   try {
     const pm = clean(document.body.innerText).match(/(?:(\d+)\s*d\.?\s*)?(\d+):(\d\d):(\d\d)[^\n]{0,25}?(?:naujoko apsaug|beginner.?s protection)/i);
