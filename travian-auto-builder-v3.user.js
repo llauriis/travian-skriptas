@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.26
+// @version      20.27
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -195,14 +195,14 @@
   const MARKET_LOW = 0.40;          // trūksta, jei <40 %
   const MARKET_EVERY = [90, 150];   // kas kiek min. daugiausia vienas pasiūlymas
   const EMPTY_OASIS_RAID = true;     // plėšti tuščias laisvas oazes kariais (legionieriais, vėliau EI)
-  const EO_MIN_TROOPS = 2, EO_GROUP = 2;   // į vieną tuščią oazę – po 3 (likę 2 – irgi siunčiami); kiti kariai – į kitas oazes
+  const EO_MIN_TROOPS = 2, EO_GROUP = 4;   // (dvigubai: oazės grįžta pilnais maišais)   // į vieną tuščią oazę – po 3 (likę 2 – irgi siunčiami); kiti kariai – į kitas oazes
   const EO_MAX_DIST = 10;
   const FARM_LIST_MODE = true;       // Aukso klubas: tuščios oazės per „Fermų“ sąrašą „Tuscios oazes“
   const FL_NAME = /Tuscios oazes|Tuščios oazės/i;
   const EI_IDLE_OASES = true;       // laisvi EI (nėra žaidėjų fermų) – tolimesnės tuščios oazės
   const FL_USE_EI = false;          // EI tuščių oazių nepuola – jie skirti žaidėjų kaimams
-  const FL_LEG = { t1: 2 };          // į kiekvieną oazę – 2 legionieriai (neša 100)
-  const FL_EI = { t5: 2 };           // kai namie yra Imperatoriaus raitelių – po 2 EI (neša 200)
+  const FL_LEG = { t1: 4 };          // į kiekvieną oazę – 2 legionieriai (neša 100)
+  const FL_EI = { t5: 4 };           // kai namie yra Imperatoriaus raitelių – po 2 EI (neša 200)
   const FL_MAX_MIN = 50;             // legionieriai: tik oazės, iki kurių eina ≤50 min.
   const FL_MAX_MIN_EI = 40;          // Imperatoriaus raiteliai: ≤40 min.
   // karių greičio daugiklis pagal serverį: x3 – išmatuota (legionierius 5 lauk. = 25 min → ×2); kitiems – spėjimas, patikrinti pirmu reidu
@@ -210,12 +210,12 @@
   const FL_SPEED_LEG = 6 * TROOP_SPEED, FL_SPEED_EI = 14 * TROOP_SPEED;   // laukeliai per valandą
   const FL_PARTIAL_COOLDOWN_H = 2;   // paskutinis reidas ne pilnu maišu → tos oazės nepulti tiek valandų
   const FL_MAX_SLOTS = 60;           // kiek daugiausia oazių laikyti sąraše
-  const FL_SIZE_MAX = 20;           // pilnu maišu grįžus – grupė į tą oazę auga ×1,5 (iki tiek); menkas grobis – mažėja
+  const FL_SIZE_MAX = 40;           // pilnu maišu grįžus – grupė į tą oazę auga ×1,5 (iki tiek); menkas grobis – mažėja
   const FL_EVERY = [5, 9];           // kas kiek min. tikrinti: grįžę kariai (≥2) iškart vėl išsiunčiami, nelaukiant visų           // tik artimos – kitaip kiti aplenkia
   const EO_EVERY = [6, 12];         // kas kiek min. tikrinti, ar kariai namie
   const EO_COOLDOWN = [80, 140];    // tos pačios oazės nepulti dažniau (min.)
   const EO_COOLDOWN_FULL = [50, 80];   // praeitą kartą pilnas maišas – grįžtam greičiau
-    const EO_GROUP_MAX = 12;           // EI į vieną oazę daugiausia (auga po +1, kai praeitas maišas pilnas)
+    const EO_GROUP_MAX = 24;           // EI į vieną oazę daugiausia (auga po +1, kai praeitas maišas pilnas)
   const EO_COOLDOWN_POOR = [150, 240];   // praeitą kartą < 30 % maišo – oazę plėšia kiti, rečiau
   const EI_FAR_MAX_MIN = 45;        // laisvi EI – oazės iki tiek minučių kelio į vieną pusę (~1,5 val. su grįžimu)
   const EI_FAR_EXT_MIN = 75;        // tik kai visos oazės iki EI_FAR_MAX_MIN jau plėštos, o EI liko – iki tiek min. (~2,5 val. su grįžimu)
@@ -2225,6 +2225,7 @@
     let budget = GM_getValue('flAvail', 0) || 0;                       // kiek karių namie – grupės skirtingo dydžio
     const groups = Math.floor(budget / base);
     const sizes = jget('flSize', {});
+    if (!GM_getValue('flSizeX2', false)) { for (const k in sizes) sizes[k].n = Math.min(FL_SIZE_MAX, sizes[k].n * 2); GM_setValue('flSizeX2', true); jset('flSize', sizes); }   // vienkartinis: jau išmoktos grupės ×2
     // grupės dydis kiekvienai oazei pagal PASKUTINĮ reidą: pilnas maišas → ×1,5 (iki FL_SIZE_MAX); mažiau nei pusė → ×0,7 (ne mažiau base)
     const sizeOf = sl => {
       const k = sl.x + '|' + sl.y, cur = sizes[k] || { n: base, t: 0 };
