@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.42
+// @version      20.43
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -326,6 +326,15 @@
   const RES_MAIN_MAX = 10;          // fermų (RESOURCE: 3-as, 4-as… kaimas) Gyvenamasis pastatas – ne aukščiau
   const MAIN_MAX = 15;              // 1-as ir 2-as kaimas (Krapštaliukai, 1c) – Gyvenamasis ne aukščiau
   const mainMax = () => ROLE === 'RESOURCE' ? RES_MAIN_MAX : MAIN_MAX;
+  // TAVO RIBOS pagal kaimo rolę (galioja ir naujame žaidime): pastatas keliamas ne aukščiau (0 – nestatomas). Planas, užpildai ir pigūs užpildai jų laikosi;
+  // tavo „Statybų užsakymai“ – ne (jais gali pakelti ranka)
+  const ROLE_CAPS = {
+    RESOURCE_START: { STABLE: 7, SMITHY: 5, HORSE_TROUGH: 0, ACADEMY: 10, WALL: 15, RALLY: 10, TOWN_HALL: 1, BARRACKS: 10, MARKET: 15 },
+  };
+  const roleCap = b => { const c = b ? (ROLE_CAPS[ROLE] || {})[b] : undefined; return c === undefined ? 99 : c; };
+  const gidCap = gid => roleCap(Object.keys(B).find(k => B[k].gid === gid));
+  // Grūdų laukai (1 kaime): kai yra resursų perteklius (sandėlis ≥ CROP_SURPLUS_FILL) ir laukų eilė neturi kito darbo – po truputį keliamas žemiausias
+  const CROP_SURPLUS_ROLES = ['RESOURCE_START'], CROP_SURPLUS_FILL = 0.6, CROP_SURPLUS_MAX = 10;
   const FILLER_MAX_LVL = 10;        // tik iki tokio lygio (pigūs)          // jei laisvų grūdų (+/val.) mažiau – skubiai kelti grūdų lauką, nepaisant plano
   // Bendra pirmo kaimo dalis po 2 kaimo (Unofficial Travian „Developing your first villages“ + karinis kaimas)
   const POST_SETTLE = [
@@ -939,7 +948,7 @@
     const planMax = {};
     for (const st of PLAN) if (st.b && B[st.b]) planMax[B[st.b].gid] = Math.max(planMax[B[st.b].gid] || 0, st.l);
     planMax[23] = Math.max(planMax[23] || 0, CRANNY_N[ROLE] ? 10 : 5);         // slėptuvės – pigi apsauga nuo plėšimų po apsaugos pabaigos
-    const lvlCap = gid => Math.min(planMax[gid] || 0, EARLY ? EARLY_BLD_MAX : FILLER_MAX_LVL);
+    const lvlCap = gid => Math.min(planMax[gid] || 0, EARLY ? EARLY_BLD_MAX : FILLER_MAX_LVL, gidCap(gid));
     const fits = c => c && c.reduce((a, v) => a + v, 0) <= pSum * CHEAP_FILL_SHARE && spent.sum + c.reduce((a, v) => a + v, 0) <= pSum * CHEAP_FILL_TOTAL && c.every((v, i) => have[i] >= v);
     const opts = [];
     for (const x of builds) {                                                 // esami pastatai
@@ -1045,7 +1054,7 @@
     let raceCut = Infinity;
     if (RACE_MODE) {
       const unfinished = [];
-      PLAN.forEach((st, i) => { if (st.b && !(st.early && !EARLY_RESIDENCE) && B[st.b] && bInfo(builds, B[st.b].gid).eff < (st.b === 'MAIN' ? Math.min(st.l, mainMax()) : (st.b === 'RESIDENCE' || st.b === 'PALACE') ? Math.min(st.l, EXPANSION_MAX_LVL) : st.l)) unfinished.push(i); });   // apriboti žingsniai (Gyvenamasis, Rezidencija) neblokuoja laukų
+      PLAN.forEach((st, i) => { if (st.b && !(st.early && !EARLY_RESIDENCE) && B[st.b] && bInfo(builds, B[st.b].gid).eff < Math.min(roleCap(st.b), st.b === 'MAIN' ? Math.min(st.l, mainMax()) : (st.b === 'RESIDENCE' || st.b === 'PALACE') ? Math.min(st.l, EXPANSION_MAX_LVL) : st.l)) unfinished.push(i); });   // apriboti žingsniai (Gyvenamasis, Rezidencija) neblokuoja laukų
       raceCut = unfinished.length > RACE_FIELD_AHEAD ? unfinished[RACE_FIELD_AHEAD] : Infinity;   // laukai gali bėgti keliais pastatų žingsniais pirmiau
     }
     // Romėnai stato dvi linijas vienu metu: jei laukų linijai iki lenktynių ribos nebėra darbo, antru ėjimu imami tolesni laukų žingsniai –
@@ -1059,6 +1068,7 @@
       if (FOCUS && (step.f || step.b !== 'RESIDENCE' || eiRush())) continue;
       if ((step.b === 'RESIDENCE' || step.b === 'PALACE') && step.l > EXPANSION_MAX_LVL) continue;   // Rezidencija/Rūmai – ne aukščiau 10
       let stepL = step.l;
+      { const rc = roleCap(step.b); if (rc < 99) { if (rc <= 0) continue; if (step.l > rc && bInfo(builds, B[step.b].gid).eff >= rc) continue; stepL = Math.min(stepL, rc); } }   // tavo ribos (ROLE_CAPS)
       if (step.b === 'MAIN') { const mm = mainMax(); if (step.l > mm && bInfo(builds, 15).eff >= mm) continue; stepL = Math.min(stepL, mm); }   // Gyvenamasis: fermose iki 10, 1–2 kaime iki 15
       if (EARLY && step.b && step.b !== 'MAIN' && step.l > EARLY_BLD_MAX) {
         const curL = B[step.b] ? bInfo(builds, B[step.b].gid).eff : 0;
@@ -1124,6 +1134,11 @@
         if (t) res.field = { lane: 'field', kind: 'upgrade', slot: t.slot, gid: 4, key: 'f' + t.slot, desc: `EI kepimas: grūdų laukas #${t.slot} → ${t.lvl + 1} (balansas ${fc})` };
       }
     }
+    // Grūdų laukai po truputį – kai sandėlis ≥ 60 % ir laukų eilė dabar neturi ką daryti (ar plano laukui dar trūksta)
+    if (!FOCUS && CROP_SURPLUS_ROLES.includes(ROLE) && fieldLaneFree && !res.field && Math.max(have[0], have[1], have[2]) / (caps.w || 1) >= CROP_SURPLUS_FILL) {
+      const cf = fields.filter(f => f.gid === 4 && !f.uc && f.good && effLvl(f) < CROP_SURPLUS_MAX && !isSkipped('f' + f.slot)).sort((a, b) => a.lvl - b.lvl)[0];
+      if (cf) { res.field = { lane: 'field', kind: 'upgrade', slot: cf.slot, gid: 4, key: 'f' + cf.slot, desc: `grūdų laukas #${cf.slot} → ${cf.lvl + 1} (perteklius)` }; res.complete = false; }
+    }
     if (FOCUS && !res.building) { res.complete = false; res.desc = eiRush() ? 'EI kepimas – statybos sustabdytos' : 'antras kaimas: laukiu resursų Rezidencijai / įsikūrėjams'; }
 
     // 3) Užpildas: plano pastatui (atnaujinimui) dabar nepakanka resursų – kelti pigiausią įmanomą esamą pastatą
@@ -1138,7 +1153,7 @@
         const mainCap = Math.min(MAIN_FILL_MAX, Math.floor(avgF) + MAIN_OVER_FIELDS, mainMax());
         const mainB = builds.find(x => x.gid === 15 && x.good && !x.uc && x.lvl < mainCap && !isSkipped('fill' + x.slot));
         const whF = Math.max(have[0], have[1], have[2]) / (caps.w || 1);
-        const fill = mainB || (whF >= LANE_SPLIT) && builds.filter(x => x.gid > 0 && x.good && !x.uc && FILLER_GIDS.includes(x.gid) && !(x.gid === 23 && crannyOff()) && x.lvl < (EARLY ? Math.min(EARLY_BLD_MAX, FILLER_MAX_LVL) : (x.gid === 17 ? MARKET_MAX : FILLER_MAX_LVL)) && !isSkipped('fill' + x.slot))
+        const fill = mainB || (whF >= LANE_SPLIT) && builds.filter(x => x.gid > 0 && x.good && !x.uc && FILLER_GIDS.includes(x.gid) && !(x.gid === 23 && crannyOff()) && x.lvl < (EARLY ? Math.min(EARLY_BLD_MAX, FILLER_MAX_LVL) : (x.gid === 17 ? MARKET_MAX : FILLER_MAX_LVL)) && x.lvl < gidCap(x.gid) && !isSkipped('fill' + x.slot))
                            .sort((a, b) => a.lvl - b.lvl)[0];
         if (fill) res.building = { lane: 'building', kind: 'upgrade', slot: fill.slot, gid: fill.gid, key: 'fill' + fill.slot, desc: `užpildas: pastatas #${fill.slot} → ${fill.lvl + 1}` };
         else if (CHEAP_FILL) { const ch = cheapFill(builds, have, EARLY); if (ch) res.building = ch; }
