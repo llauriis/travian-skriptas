@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.32
+// @version      20.33
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -289,6 +289,7 @@
   };
   // 1 lygio kaina (mediena, molis, geležis, grūdai) ir daugiklis lygiui – „pigaus užpildo“ palyginimui su laukiamu pastatu
   const BCOST = {
+    1: [[40, 100, 50, 60], 1.67], 2: [[80, 40, 80, 50], 1.67], 3: [[100, 80, 30, 60], 1.67], 4: [[70, 90, 70, 20], 1.67],   // laukai (rezervui kariams)
     5: [[520, 380, 290, 90], 1.8], 6: [[440, 480, 320, 50], 1.8], 7: [[200, 450, 510, 120], 1.8], 8: [[500, 440, 380, 1240], 1.8], 9: [[1200, 1480, 870, 1600], 1.8],
     10: [[130, 160, 90, 40], 1.28], 11: [[80, 100, 70, 20], 1.28], 13: [[170, 200, 380, 130], 1.28], 15: [[70, 40, 60, 20], 1.28],
     16: [[110, 160, 90, 70], 1.28], 17: [[80, 70, 120, 70], 1.28], 18: [[180, 130, 150, 80], 1.28], 19: [[210, 140, 260, 120], 1.28],
@@ -2324,7 +2325,6 @@
   const AUC_HORIZON_S = 240;         // domina aukcionai, kurie baigiasi per tiek sekundžių
   const AUC_SNIPE_S = 9;             // statoma, kai liko ne daugiau tiek sekundžių
   const AUC_DAILY_MAX = 4000;        // daugiausia sidabro statymų suma per parą
-  const AUC_TIE_PCT = 3;             // statymas iki tiek % virš ribos (ne apvalus skaičius) – kad nepralaimėtume lygiosiomis
   const AUC_MAX_BIDS_RUN = 5;       // daugiausia statymų per vieną apsilankymą
   const AUC_WILD_MIN_SALES = 3;      // radiniai: daikto pardavimų per paskutines 24 val. ≥ tiek (kad vidutinė kaina ką nors reikštų)
   const AUC_Q = 'query($after:String$first:Int!$sortBy:AuctionsSortBy$sortOrder:SortOrder$filter:AuctionFilter){bootstrapData{timestamp}ownPlayer{wallet{silverAmount}auctions{buy(after:$after first:$first sortBy:$sortBy sortOrder:$sortOrder filter:$filter){edges{node{amount bidsAmount finishedAt highestBidder{id name relation}identifier maxBid price item{typeId name rarity}}}}}}}';
@@ -2446,12 +2446,7 @@
     if (!btn || /gold/.test(cls) || !/green/.test(cls)) { aucLog(`mygtukas ne žalias (sidabro nepakanka?) – nestatau, kaina ${cand.minBid}`); return false; }   // geltonas = auksas → sidabras: NIEKADA
     // Aukcionas – „antros kainos“: laimi didžiausias MAKSIMALUS statymas, mokama tik šiek tiek daugiau už antrą. Todėl statom savo ribą (ne kainą +1):
     // kitaip lyderio slaptas maksimalus statymas visada aplenkia
-    // Lygiosios: kai kito žaidėjo maksimumas toks pat, laimi ANKSTESNIS statymas (mes statom paskutiniai – pralaimim). Visi stato apvaliais skaičiais
-    // (200, 300…) – todėl statom šiek tiek daugiau (AUC_TIE_PCT %, ne mažiau +1) ir ne apvalų skaičių
-    const capAmt = cand.capUnit * cand.amount;
-    let tieAmt = Math.floor(capAmt + Math.max(1, capAmt * AUC_TIE_PCT / 100));
-    if (tieAmt % 10 === 0) tieAmt += 3; else if (tieAmt % 5 === 0) tieAmt += 2;
-    const bidAmt = Math.min(tieAmt, +GM_getValue('aucSilver', 0) || 0, AUC_DAILY_MAX - aucSpent());
+    const bidAmt = Math.min(Math.floor(cand.capUnit * cand.amount), +GM_getValue('aucSilver', 0) || 0, AUC_DAILY_MAX - aucSpent());   // tiksliai tavo riba
     if (bidAmt < cand.minBid) { aucLog(`paros riba ar sidabro trūksta (${bidAmt} < ${cand.minBid}) – nestatau`); return false; }
     if (mode !== 'on') { aucLog(`BANDYMAS: statyčiau iki ${bidAmt} (dabar ${cand.minBid}) už ${nm} x${cand.amount} (${per}/vnt., riba ${Math.round(cand.capUnit)}), liko ${cand.left} s, statymų ${cand.bidsAmount}`); jset('aucMy', { ...jget('aucMy', {}), [cand.identifier]: { price: cand.price, ts: Date.now() } }); return true; }
     setInput(inp, String(bidAmt)); await sleep(rand(300, 700));
@@ -2584,6 +2579,34 @@
   function noteStock() {                                                   // kiekvieno kaimo sandėlio būklė – gavėjo vietai apskaičiuoti
     const st = stockInfo(); if (!st.cw) return;
     const a = jget('villStock', {}); a[DID] = { have: st.have, cw: st.cw, cg: st.cg, ts: Date.now() }; jset('villStock', a);
+  }
+  // ---- SIUNTIMO UŽSAKYMAI (lange „Turgus“): iš kaimo A į kaimą B tiksliai nurodytas kiekis; vieną kartą arba kas N val.
+  //      Jei dabar tiek nėra ar netelpa į prekeivius – siunčiama, kiek galima, likutis – kitą kartą ----
+  const shipOrders = () => jget('shipOrders', []) || [];
+  function shipOrderChore() {
+    const now = Date.now(), list = shipOrders();
+    const o = list.find(x => x.from === String(DID) && (x.next || 0) <= now && x.left.some(v => v > 0));
+    if (!o || now < (vget('shipNext', 0) || 0)) return false;
+    const tv = ownVillageList().find(v => v.did === String(o.to));
+    if (!tv || tv.x === null) return false;
+    if (attackSoon(String(o.to), 60)) { setStatus(`siuntimo užsakymas: į „${tv.name}“ artėja puolimas – palauksiu`); return false; }
+    const st = stockInfo(); if (!st.cw) return false;
+    const can = o.left.map((l, k) => Math.max(0, Math.min(l, Math.floor(st.have[k]))));
+    if (can.reduce((a, b) => a + b, 0) < Math.min(SUPPLY_MIN, o.left.reduce((a, b) => a + b, 0))) { vset('shipNext', now + rand(10, 20) * 60000); setStatus(`siuntimo užsakymas → „${tv.name}“: dar trūksta resursų`); return false; }
+    vset('shipNext', now + rand(3, 6) * 60000);
+    log(`Siuntimo užsakymas → „${tv.name}“: ${can.join('/')} (liko užsakyme ${o.left.join('/')})`);
+    jset('supplyPlan', { did: String(o.to), x: tv.x, y: tv.y, send: can.slice(0, 3), crop: can[3], route: true, ord: o.id });
+    startChore('supply', '/build.php?gid=17&t=5');
+    return true;
+  }
+  function shipOrderSent(id, sent) {
+    const list = shipOrders(), o = list.find(x => x.id === id); if (!o) return;
+    o.left = o.left.map((l, k) => Math.max(0, l - (sent[k] || 0)));
+    if (o.left.every(v => v <= 0)) {
+      if (o.every > 0) { o.left = [...o.amt]; o.next = Date.now() + o.every * 3600000; log('Siuntimo užsakymas įvykdytas, kartosis po', o.every, 'val.'); }
+      else { list.splice(list.indexOf(o), 1); log('Siuntimo užsakymas įvykdytas ir pašalintas'); }
+    }
+    jset('shipOrders', list);
   }
   function routeSend(dest, my, mc) {
     const now = Date.now();
@@ -2725,9 +2748,31 @@
       <div style="color:#555;margin:6px 0">Auto: jei yra prioritetinis kaimas – siunčia į jį; jei nėra – kaip anksčiau (grandinė ir laukų spurtas). Rankinis: visada į pasirinktą kaimą. Nesiųsti: šis kaimas niekam nesiunčia.
         Gavėjui pildoma iki nurodyto %, įskaičiuojant pakeliui esančius siuntinius. Į kaimą, į kurį artėja puolimas (≤ 60 min.), nesiunčiama.</div>
       <button id="abMkS" style="padding:3px 10px;background:#357;color:#fff;border:0;border-radius:4px;cursor:pointer">Išsaugoti</button>
+      <div style="font-weight:bold;margin:12px 0 3px;border-top:1px solid #dde;padding-top:8px">Siųsti nurodytą kiekį</div>
+      <div>Iš <select id="abSoF">${opt(String(DID), vs.map(v => [v.did, v.name]))}</select> į <select id="abSoT">${opt((vs.find(v => v.did !== String(DID)) || {}).did || '', vs.map(v => [v.did, v.name]))}</select>
+        <select id="abSoE">${opt('0', [['0', 'vieną kartą'], ['1', 'kas 1 val.'], ['2', 'kas 2 val.'], ['4', 'kas 4 val.'], ['6', 'kas 6 val.'], ['12', 'kas 12 val.'], ['24', 'kas 24 val.']])}</select></div>
+      <div style="margin:4px 0">Mediena <input id="abSo0" type="number" min="0" value="0" style="width:65px"> Molis <input id="abSo1" type="number" min="0" value="0" style="width:65px"> Geležis <input id="abSo2" type="number" min="0" value="0" style="width:65px"> Grūdai <input id="abSo3" type="number" min="0" value="0" style="width:65px">
+        <button id="abSoA" style="padding:2px 8px;background:#357;color:#fff;border:0;border-radius:4px;cursor:pointer">Pridėti</button></div>
+      <div id="abSoL" style="font-size:11px"></div>
+      <div style="color:#555;margin-top:4px">Siunčiama pirmiau už automatiką (ir kai kaimui nustatyta „Nesiųsti“). Jei dabar tiek resursų nėra ar netelpa į prekeivius – siunčiama kiek galima, likutis – vėliau.</div>
       <div style="color:#555;margin-top:8px">Paskutiniai siuntimai:</div><div style="font-size:11px">${log8}</div>`;
     document.body.appendChild(box);
     document.getElementById('abMktX').onclick = () => box.remove();
+    const vn = d => ((vs.find(v => v.did === String(d)) || {}).name) || d;
+    const soRender = () => {
+      const l = shipOrders();
+      box.querySelector('#abSoL').innerHTML = l.length ? l.map(o => `<div style="border-top:1px solid #eee;padding:2px 0">${vn(o.from)} → ${vn(o.to)}: ${o.amt.join(' / ')} ${o.every ? 'kas ' + o.every + ' val.' : 'vieną kartą'} · liko ${o.left.join(' / ')}${o.next > Date.now() ? ' · kitas ' + hhmm(o.next) : ''} <button data-so="${o.id}" style="border:0;background:#a22;color:#fff;border-radius:3px;cursor:pointer">✕</button></div>`).join('') : '<span style="color:#555">užsakymų nėra</span>';
+      box.querySelectorAll('[data-so]').forEach(b => b.onclick = () => { jset('shipOrders', shipOrders().filter(o => o.id !== b.dataset.so)); soRender(); });
+    };
+    soRender();
+    document.getElementById('abSoA').onclick = () => {
+      const from = box.querySelector('#abSoF').value, to = box.querySelector('#abSoT').value;
+      const amt = [0, 1, 2, 3].map(k => Math.max(0, parseInt(box.querySelector('#abSo' + k).value, 10) || 0));
+      if (!from || !to || from === to || !amt.some(v => v > 0)) { box.querySelector('#abSoL').insertAdjacentHTML('afterbegin', '<div style="color:#a22">pasirink skirtingus kaimus ir kiekį</div>'); return; }
+      const l = shipOrders(); l.push({ id: Date.now().toString(36), from, to, amt, left: [...amt], every: +box.querySelector('#abSoE').value || 0, next: 0 }); jset('shipOrders', l);
+      GM_setValue('shipNext@' + from, 0); log('Siuntimo užsakymas pridėtas:', vn(from), '→', vn(to), amt.join('/'));
+      soRender();
+    };
     document.getElementById('abMkS').onclick = () => {
       const nc = { prio: document.getElementById('abMkP').value, fill: +document.getElementById('abMkF').value || 90, v: {} };
       for (const tr of box.querySelectorAll('tr[data-did]')) {
@@ -2741,6 +2786,7 @@
   }
   function supplyChore() {
     noteStock();
+    if (shipOrderChore()) return true;                                     // tavo nurodyti kiekiai – pirmiau už viską
     if (!SUPPLY || Date.now() < (vget('supplyNext', 0) || 0)) return false;
     const vs = allVillages(), i = vs.indexOf(String(DID));
     {                                                                      // TURGAUS nustatymai (lango „Turgus“) – pirmiau už automatiką
@@ -2814,6 +2860,7 @@
     if (conf) { conf.click(); await sleep(rand(1500, 2500)); }
     if (!p.dump) { const needs = jget('supplyNeeds', {}); delete needs[p.did]; jset('supplyNeeds', needs); }
     { const sl = jget('sentLog', []).filter(e => Date.now() - e.ts < 24 * 3600000); sl.push({ from: String(DID), to: String(p.did || ''), amt: send.slice(0, 4), ts: Date.now() }); jset('sentLog', sl.slice(-60)); }
+    if (p.ord) shipOrderSent(p.ord, send.slice(0, 4));
     log(`${p.dump ? 'Gelbėjimas: ' : ''}Resursai išsiųsti į ${p.x}|${p.y}: mediena ${send[0]}, molis ${send[1]}, geležis ${send[2]}, grūdai ${send[3] || 0}`);
     setStatus(`išsiųsta į ${p.x}|${p.y}: ${send.join(' / ')}`);
     finishChore();
@@ -3686,6 +3733,32 @@
   const CUSTOM_SHARE = 0.25;         // PASIRINKTA: vienu kartu – iki tokios atsargų dalies
   const CUSTOM_MAX_BATCH = 40;       // ir ne daugiau tiek vienetų
   const CUSTOM_EVERY = [20, 40];     // kas kiek min. tikrinti
+  // REZERVAS KARIAMS: kai kaime gaminami kariai, TRAIN_RES_PCT valandinės gamybos (kiekvienos žaliavos) atidedama kariams –
+  // statybos šių resursų neliečia (laukia, kol virš rezervo užteks). Rezervas kaupiasi iki TRAIN_RES_CAP_H valandų, treniruojant – sunaudojamas
+  const TRAIN_RES_PCT = 0.6, TRAIN_RES_CAP_H = 3, TRAIN_RES_MAX_BATCH = 200;
+  function trainActive() {
+    if (!GM_getValue('trainOn', true) || !GM_getValue('buildOn', true) || settlerSaving()) return false;
+    const tc = trainCfgFor(DID);
+    if (tc.mode === 'off') return false;
+    if (tc.mode === 'custom') {
+      const lv = vget('blv', {}) || {}, full = vget('trainFull', {}) || {};
+      return Object.entries(tc.units || {}).some(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && !(full[u] > Date.now()));
+    }
+    return MILITARY_ROLES.includes(ROLE);
+  }
+  // dorf1: rezervas papildomas pagal praėjusį laiką ir valandinę gamybą (#production); grąžina [mediena, molis, geležis, grūdai]
+  function trainReserve() {
+    const now = Date.now();
+    let r = vget('trainRes', null) || { r: [0, 0, 0, 0], ts: now };
+    if (!trainActive()) { vset('trainRes', { r: [0, 0, 0, 0], ts: now }); return [0, 0, 0, 0]; }
+    const prod = [...document.querySelectorAll('#production .num')].map(e => parseInt(clean(e.textContent).replace(/[^\d-]/g, ''), 10) || 0);
+    if (prod.length >= 4) {
+      const h = Math.max(0, Math.min(now - (r.ts || now), 2 * 3600000)) / 3600000;
+      r = { r: r.r.map((v, i) => Math.min(v + Math.max(0, prod[i]) * TRAIN_RES_PCT * h, Math.max(0, prod[i]) * TRAIN_RES_PCT * TRAIN_RES_CAP_H)), ts: now, prod: prod.slice(0, 4) };
+      vset('trainRes', r);
+    }
+    return r.r.map(v => Math.round(v));
+  }
   function trainCfgFor(did) {
     const c = jget('trainCfg', {})[did];
     if (c && c.mode) return c;
@@ -3905,7 +3978,12 @@
       return finishChore();
     }
     if (plan.exact) n = Math.min(plan.exact, Math.floor(Math.min(...have.map((h, i) => h / cost[i]))));
-    else n = Math.min(Math.floor(Math.min(...have.map((h, i) => (h * plan.share) / cost[i]))), plan.max);
+    else {
+      const tr = ((vget('trainRes', null) || {}).r) || [0, 0, 0, 0];
+      const nShare = Math.min(Math.floor(Math.min(...have.map((h, i) => (h * plan.share) / cost[i]))), plan.max);
+      const nRes = Math.min(Math.floor(Math.min(...have.map((h, i) => Math.max(h * plan.share, Math.min(h, tr[i])) / cost[i]))), TRAIN_RES_MAX_BATCH);   // bent rezervas kariams
+      n = Math.max(nShare, nRes);
+    }
     // grūdų balanso nebetikrinam – jį tvarko turgus ir statybos (tavo sprendimas)
     if (plan.target) {                                                    // PASIRINKTA: iki nurodyto skaičiaus (namie + išėję + eilėje)
       const own = await ownedTroops();
@@ -3919,6 +3997,7 @@
     await sleep(rand(800, 2000));
     GM_setValue('chore', 'trainDone'); GM_setValue('choreTs', Date.now()); GM_setValue('navTs', Date.now());
     log(`Treniruojama: ${n} × ${plan.unit}`);
+    { const r = vget('trainRes', null); if (r && r.r) { r.r = r.r.map((v, i) => Math.max(0, v - n * cost[i])); vset('trainRes', r); } }   // rezervas sunaudotas
     if (plan.target) { const sp = vget('trainSpent', {}) || {}; sp[plan.unit] = (sp[plan.unit] || 0) + n * cost.reduce((a, b) => a + b, 0); vset('trainSpent', sp); }   // resursų balansui tarp tipų
     if (plan.unit === 't10') { const st = stGet(); stSet({ ...st, have: (st.have || 0) + n }); }
     setStatus(`treniruojama: ${n} ${plan.label}`);
@@ -4809,6 +4888,13 @@
     const d = decide(fields, builds, have, caps, free, blockedB);
     if (!GM_getValue('buildOn', true) && !cropOnly) { d.building = null; d.field = null; }   // karo režimas: tik užsakymai
     { const oa = orderAction(fields, builds, free); if (oa.demolish) return; if (oa.field) d.field = oa.field; if (oa.building) d.building = oa.building; if (oa.field || oa.building) d.ordered = true; }
+    { const tres = trainReserve();                                          // rezervas kariams – statybos jo neliečia
+      if (tres.some(v => v >= 1)) for (const lane of ['field', 'building']) {
+        const a = d[lane]; if (!a) continue;
+        const cur = lane === 'field' ? fields.find(f => +f.slot === +a.slot) : builds.find(b => +b.slot === +a.slot);
+        const cost = bCost(a.gid, a.kind === 'new' || !cur ? 1 : cur.lvl + (cur.uc ? 1 : 0) + 1);
+        if (cost && cost.some((c, i) => have[i] - tres[i] < c)) { d[lane] = null; d.resWait = `${a.desc} – laukia, rezervas kariams ${tres.join('/')}`; }
+      } }
     if (cropOnly && !d.ordered) {                                          // karo režimas + mažai grūdų: tik žemiausias grūdų laukas
       d.building = null;
       if (!(d.field && d.field.gid === 4)) {
@@ -4826,7 +4912,7 @@
       if (maybeChores()) return;
       if (wakeActive() && wakeFinish()) return;                         // nakties serija: viskas padaryta → miegoti
       if (d.complete) setStatus('planas įvykdytas');
-      else setStatus((saving ? `taupau įsikūrėjams (${stGet().have || 0}/3), laukai – toliau; ` : '') + (d.desc ? 'kitas: ' + d.desc : 'nėra ką daryti dabar'));
+      else setStatus((saving ? `taupau įsikūrėjams (${stGet().have || 0}/3), laukai – toliau; ` : '') + (d.resWait ? d.resWait : d.desc ? 'kitas: ' + d.desc : 'nėra ką daryti dabar'));
       const m = minTimer();
       return scheduleNext(d.complete ? 1800 : (qLen && isFinite(m) ? Math.min(m + rand(1, 5), rand(...RETRY)) : rand(...RETRY)));
     }
