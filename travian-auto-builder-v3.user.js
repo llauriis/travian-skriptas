@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.43
+// @version      20.44
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1742,12 +1742,17 @@
   const RAID_NATARS = true;         // natarų kaimai (ne Pasaulio stebuklo) – plėšimo taikiniai; žvalgyba prieš puolant, kaip ir žaidėjams
   const isNatar = f => /^Natars$/i.test((f.player || '').trim());
   // Draugai – NIEKADA nepulti: savo aljansas, jo sąjungos ir nepuolimo paktai (iš aljanso „Duomenų“), taip pat savo aljanso „sparnai“ (AFU → AFU-A, AFU-C…)
+  // TAVO SĄRAŠAS: šių aljansų (ir jų „sparnų“, pvz. WLV-2) NEpulti, NEžvalgyti, NEplėšti – kaip savo aljanso
+  const NO_ATTACK_TAGS = ['WLV'];
+  const tagNorm = t => String(t || '').replace(/<[^>]*>/g, '').toLowerCase().replace(/[^a-z0-9ąčęėįšųūž\-]/g, '');   // žemėlapyje „WLV™<br />“ → „wlv“
+  const isNoAttack = tag => { const t = tagNorm(tag); return !!t && [...NO_ATTACK_TAGS, ...(jget('noAttackTags', []) || [])].map(tagNorm).some(n => n && (t === n || t.startsWith(n + '-'))); };
   const isMyAlly = f => {
-    const my = String(GM_getValue('myAlly', '') || '').trim().toLowerCase(), tag = String(f.ally || '').trim().toLowerCase();
+    const my = tagNorm(GM_getValue('myAlly', '')), tag = tagNorm(f.ally);     // žemėlapio žymė būna su „<br />“ – be valymo savo aljanso neatpažindavo
     if (!tag) return false;
+    if (isNoAttack(tag)) return true;
     if (my && (tag === my || tag.startsWith(my + '-') || my.startsWith(tag + '-'))) return true;
     if (f.aid && jget('friendAids', []).includes(+f.aid)) return true;
-    return jget('friendTags', []).includes(tag);
+    return jget('friendTags', []).map(tagNorm).includes(tag);
   };
   async function friendsChore() {                                        // be naršymo: aljanso puslapis per fetch, kas ~1 val.
     if (Date.now() < (GM_getValue('friendsNext', 0) || 0)) return;
