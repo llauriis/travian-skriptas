@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.52
+// @version      20.53
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -109,8 +109,9 @@
   const OASIS_EI_MAX = 30;
   // HEROJUS + ARMIJA: į oazę su gyvūnais kartu eina ir pėstininkai (bei visi EI), jei kova neišeina į minusą:
   // premija už nukautus gyvūnus (~OASIS_BONUS_PER_UP resursų už 1 gyvūno išlaikymo vnt., iš tavo ataskaitos: 9 vnt. → 1 440) ≥ žuvusių karių kaina
-  const OASIS_ARMY = true, OASIS_BONUS_PER_UP = 160, ARMY_MAX_MIN = 20, ARMY_NOHERO_MIN = 50, OASIS_STOCK_GUESS = 400;   // pėstininkai į oazes – iki 20 min. kelio
+  const OASIS_ARMY = true, OASIS_BONUS_PER_UP = 160, ARMY_MAX_MIN = 20, ARMY_NOHERO_MIN = 20, OASIS_STOCK_GUESS = 400;   // pėstininkai į oazes su gyvūnais – iki 20 min. kelio į vieną pusę (toliau – herojus su raiteliais)
   const UNIT_ATT_R = { t1: 40, t3: 70, t5: 120 }, UNIT_COST_R = { t1: 400, t3: 600, t5: 1410 };          // daugiausia EI kartu su herojumi
+  const EI_BUSY_COST = 25;          // EI, išėjęs su herojumi, negali plėšti kitur – kad prieš 1 gyvūną nesiųstų 30 EI
   const HERO_MOUNTED = true;        // herojus su žirgu – kovoje skaičiuojamas kaip raitelis
   const HERO_HP_VALUE = 1000;       // 1 % herojaus sveikatos vertė resursais (renkantis, kiek EI siųsti su herojumi; keičiama lange „Karžygys“)
   const OASIS_EI_MAX_DEATHS = 1;    // pirmenybė – kad nežūtų nė vienas; 1 leidžiamas tik jei kitaip oazės nepulsim        // toliausias atstumas, kurį verta ieškoti (laukeliais)
@@ -1886,6 +1887,7 @@
     const now = Date.now();
     const cands = Object.values(farms).map(f => ({ ...f, ...farmStatus(f), dist: Math.hypot(f.x - v.x, f.y - v.y), pop: (f.hist[f.hist.length - 1] || [0, 0])[1] }))
       .map(f => ({ ...f, active: !(f.st === 'NEAKTYVUS' || f.st === 'galbūt neaktyvus' || (f.allyFarm && now - f.allyFarm < 48 * 3600000) || (RAID_NATARS && isNatar(f))) }))
+      .filter(f => !(tagNorm(f.ally) && !(f.allyFarm && now - f.allyFarm < 72 * 3600000)))   // ALJANSO narys – aktyvus: nežvalgom ir nepuolam, nebent mūsų aljansas jį sėkmingai plėšia
       .filter(f => (!f.active || (ACTIVE_RAID && f.dist <= ACTIVE_MAX_DIST)) && f.pop >= RAID_MIN_POP && f.dist <= RAID_MAX_DIST && !/WW Village/i.test(f.name || ''))   // natarų kaimai – papildomas šaltinis; AKTYVŪS – tik arti ir tik be gynėjų; Pasaulio stebuklo kaimų – NE
       .filter(f => !isMyAlly(f))                                                                    // savo aljanso ir tavo „nepulti“ sąrašo – NIEKADA
       .filter(f => { const r = raids[f.x + '|' + f.y] || {}; const deathHold = r.scoutDead && now < (r.deadUntil || 0) && !(r.deadActive && playerStill(r, now)), otherBlock = r.block > now && r.block !== r.deadUntil; return !scoutBarred(r, f, now) && !crannyBarred(r, f) && !deathHold && !otherBlock && (now - (r.last || 0) > (40 + f.dist * 4) * 60000 || (r.scouted && r.scouted === r.last && stockFreshFor(r, f, now))); })   // ką tik žvalgytą (ataskaita gauta) – pulti iškart
@@ -5033,7 +5035,7 @@
         const okFor = n => { const l = lossFor(n); return winsFor(n) && health >= hc().oasisMin && l <= hc().oasisMaxLoss && health - l >= hc().oasisKeep; };
         // Kiek EI siųsti: didžiausia NAUDA = premija už nukautus gyvūnus − žuvę EI − herojaus sveikata (1 % = hc().hpValue resursų).
         // Herojaus sveikata – riboto greičio išteklius: geriau prarasti 1 EI ir saugoti herojų (pvz. 25 EI: −1 EI, herojui −3 %; 5 EI: 0 EI, herojui −9 %)
-        const valFor = n => OASIS_BONUS_PER_UP * xp / (1 + xFor(n)) - deathsFor(n) * UNIT_COST_R.t5 - lossFor(n) * hc().hpValue;
+        const valFor = n => OASIS_BONUS_PER_UP * xp / (1 + xFor(n)) - deathsFor(n) * UNIT_COST_R.t5 - lossFor(n) * hc().hpValue - n * EI_BUSY_COST;   // kiekvienas EI užimtas – negali plėšti kitur
         let nEI = 0, bestV = -Infinity;
         for (let n = 0; n <= eiAvail; n++) if (okFor(n) && deathsFor(n) <= OASIS_EI_MAX_DEATHS) { const v = valFor(n); if (v > bestV) { bestV = v; nEI = n; } }
         let loss = lossFor(nEI);      // laisvą oazę žaidimas leidžia tik plėšti (patikrinta)
