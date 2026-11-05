@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.46
+// @version      20.47
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -5071,7 +5071,13 @@
     const nearFull = cW && cG && stock.some((h, i) => h >= (i < 3 ? cW : cG) * STORAGE_LIMIT);
     // Statybos pirmiau už šalutinius darbus; kartais (25 %) žmogus pirma pasižiūri kitur – bet ne kai sandėlis pilnas
     if (jget('aucTarget', null) && maybeChores()) return;                 // aukcionas baigiasi – nelaukti atsitiktinumo
-    if (!nearFull && !wakeActive() && Math.random() < 0.25 && maybeChores()) return;
+    // Kariniuose kaimuose (plėšimai, oazės, herojus, turgus) darbai ir statybos KAITALIOJASI: vienas ciklas – darbams, kitas – statyboms.
+    // Anksčiau darbams tekdavo tik 25 % ciklų – kai resursų daug ir statyti visada yra ką, plėšimai, žvalgai ir oazės stovėdavo valandas (1c 14:11–17:53)
+    if (!nearFull && !wakeActive()) {
+      const turn = MILITARY_ROLES.includes(ROLE) ? !vget('choreLast', false) : Math.random() < 0.25;
+      if (turn && maybeChores()) { vset('choreLast', true); return; }
+      vset('choreLast', false);
+    }
 
     const qLen = document.querySelectorAll('.buildingList ul li').length;
     if (qLen >= (ROMAN ? 3 : 1)) {
