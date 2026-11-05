@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.31
+// @version      20.32
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -2324,7 +2324,8 @@
   const AUC_HORIZON_S = 240;         // domina aukcionai, kurie baigiasi per tiek sekundžių
   const AUC_SNIPE_S = 9;             // statoma, kai liko ne daugiau tiek sekundžių
   const AUC_DAILY_MAX = 4000;        // daugiausia sidabro statymų suma per parą
-  const AUC_MAX_BIDS_RUN = 5;        // daugiausia statymų per vieną apsilankymą
+  const AUC_TIE_PCT = 3;             // statymas iki tiek % virš ribos (ne apvalus skaičius) – kad nepralaimėtume lygiosiomis
+  const AUC_MAX_BIDS_RUN = 5;       // daugiausia statymų per vieną apsilankymą
   const AUC_WILD_MIN_SALES = 3;      // radiniai: daikto pardavimų per paskutines 24 val. ≥ tiek (kad vidutinė kaina ką nors reikštų)
   const AUC_Q = 'query($after:String$first:Int!$sortBy:AuctionsSortBy$sortOrder:SortOrder$filter:AuctionFilter){bootstrapData{timestamp}ownPlayer{wallet{silverAmount}auctions{buy(after:$after first:$first sortBy:$sortBy sortOrder:$sortOrder filter:$filter){edges{node{amount bidsAmount finishedAt highestBidder{id name relation}identifier maxBid price item{typeId name rarity}}}}}}}';
   const aucCfg = () => {
@@ -2445,7 +2446,12 @@
     if (!btn || /gold/.test(cls) || !/green/.test(cls)) { aucLog(`mygtukas ne žalias (sidabro nepakanka?) – nestatau, kaina ${cand.minBid}`); return false; }   // geltonas = auksas → sidabras: NIEKADA
     // Aukcionas – „antros kainos“: laimi didžiausias MAKSIMALUS statymas, mokama tik šiek tiek daugiau už antrą. Todėl statom savo ribą (ne kainą +1):
     // kitaip lyderio slaptas maksimalus statymas visada aplenkia
-    const bidAmt = Math.min(Math.floor(cand.capUnit * cand.amount), +GM_getValue('aucSilver', 0) || 0, AUC_DAILY_MAX - aucSpent());
+    // Lygiosios: kai kito žaidėjo maksimumas toks pat, laimi ANKSTESNIS statymas (mes statom paskutiniai – pralaimim). Visi stato apvaliais skaičiais
+    // (200, 300…) – todėl statom šiek tiek daugiau (AUC_TIE_PCT %, ne mažiau +1) ir ne apvalų skaičių
+    const capAmt = cand.capUnit * cand.amount;
+    let tieAmt = Math.floor(capAmt + Math.max(1, capAmt * AUC_TIE_PCT / 100));
+    if (tieAmt % 10 === 0) tieAmt += 3; else if (tieAmt % 5 === 0) tieAmt += 2;
+    const bidAmt = Math.min(tieAmt, +GM_getValue('aucSilver', 0) || 0, AUC_DAILY_MAX - aucSpent());
     if (bidAmt < cand.minBid) { aucLog(`paros riba ar sidabro trūksta (${bidAmt} < ${cand.minBid}) – nestatau`); return false; }
     if (mode !== 'on') { aucLog(`BANDYMAS: statyčiau iki ${bidAmt} (dabar ${cand.minBid}) už ${nm} x${cand.amount} (${per}/vnt., riba ${Math.round(cand.capUnit)}), liko ${cand.left} s, statymų ${cand.bidsAmount}`); jset('aucMy', { ...jget('aucMy', {}), [cand.identifier]: { price: cand.price, ts: Date.now() } }); return true; }
     setInput(inp, String(bidAmt)); await sleep(rand(300, 700));
@@ -3946,6 +3952,9 @@
   const heroResDid = () => { const vs = allVillages(), c = GM_getValue('heroResVil', 'auto'); return c !== 'auto' && vs.includes(c) ? c : (BONUS_TO_NEW ? vs[vs.length - 1] : DID); };
   const notNewest = () => { const vs = allVillages(); return vs.length > 1 && DID !== heroResDid(); };
   function maybeChores() {
+    // Aukcionas baigiasi per kelias minutes – tai skubiausia (eilės ratu laukti negalima, kitaip taikinys pasensta)
+    { const t = jget('aucTarget', null);
+      if (t && GM_getValue('aucMode', 'test') !== 'off') { jset('aucTarget', null); if (Date.now() - t.ts < 180000) { startChore('auction', t.url); return true; } } }
     // Užduočių burbulas (!) – surinkti atlygį ir netrukus perkelti iš kuprinės į sandėlį
     if (COLLECT_TASKS && questBadge() && Date.now() >= (GM_getValue('questBadgeNext', 0) || 0)) {
       GM_setValue('questBadgeNext', Date.now() + rand(10, 18) * 60 * 1000);
@@ -4759,6 +4768,7 @@
     const stock = [1, 2, 3, 4].map(i => num(document.getElementById('l' + i)));
     const nearFull = cW && cG && stock.some((h, i) => h >= (i < 3 ? cW : cG) * STORAGE_LIMIT);
     // Statybos pirmiau už šalutinius darbus; kartais (25 %) žmogus pirma pasižiūri kitur – bet ne kai sandėlis pilnas
+    if (jget('aucTarget', null) && maybeChores()) return;                 // aukcionas baigiasi – nelaukti atsitiktinumo
     if (!nearFull && !wakeActive() && Math.random() < 0.25 && maybeChores()) return;
 
     const qLen = document.querySelectorAll('.buildingList ul li').length;
