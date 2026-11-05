@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.33
+// @version      20.34
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -2608,6 +2608,7 @@
     }
     jset('shipOrders', list);
   }
+  const MKT_BUD_CAP_H = 6;           // siuntimui skirta gamybos dalis kaupiama daugiausia tiek valandų
   function routeSend(dest, my, mc) {
     const now = Date.now();
     const tv = ownVillageList().find(v => v.did === String(dest));
@@ -2620,12 +2621,21 @@
     const room = [0, 1, 2, 3].map(k => t && now - t.ts < 6 * 3600000 ? Math.max(0, Math.floor(fill * (k < 3 ? t.cw : t.cg) - t.have[k] - sent[k])) : 1e9);
     const st = stockInfo(); if (!st.cw) return false;
     const keep = Math.max(0, Math.min(100, my.keep ?? 0)) / 100, keepC = Math.max(0, Math.min(100, my.keepCrop ?? 10)) / 100;
-    const send = [0, 1, 2].map(k => Math.max(0, Math.min(room[k], Math.floor(st.have[k] - keep * st.cw))));
-    const crop = my.crop === false ? 0 : Math.max(0, Math.min(room[3], Math.floor(st.have[3] - keepC * st.cg)));
-    if (send.reduce((a, b) => a + b, 0) + crop < SUPPLY_MIN) return false;
+    // „Palikti sau %“ – nuo VALANDINĖS GAMYBOS: kaimas pasilieka tiek % to, ką prigamina, likusi gamybos dalis kaupiasi siuntimui
+    const prod = [...document.querySelectorAll('#production .num')].map(e => parseInt(clean(e.textContent).replace(/[^\d-]/g, ''), 10) || 0);
+    if (prod.length < 4) return false;
+    const share = [1 - keep, 1 - keep, 1 - keep, my.crop === false ? 0 : 1 - keepC];
+    const b = vget('mktBud', null) || { r: [0, 0, 0, 0], ts: now };
+    const h = Math.max(0, Math.min(now - (b.ts || now), MKT_BUD_CAP_H * 3600000)) / 3600000;
+    b.r = b.r.map((v, k) => Math.min(v + Math.max(0, prod[k]) * share[k] * h, Math.max(0, prod[k]) * share[k] * MKT_BUD_CAP_H)); b.ts = now; vset('mktBud', b);
+    const tres = trainReserve();                                             // rezervo kariams neliečiam
+    const can = k => Math.max(0, Math.min(room[k], Math.floor(b.r[k]), Math.floor(st.have[k] - tres[k])));
+    const send = [0, 1, 2].map(can);
+    const crop = my.crop === false ? 0 : can(3);
+    if (send.reduce((a, x) => a + x, 0) + crop < SUPPLY_MIN) { setStatus(`turgus → „${tv.name}“: kaupiama siuntimui ${b.r.map(Math.round).join('/')} (gamybos dalis)`); return false; }
     vset('supplyNext', now + rand(...SUPPLY_EVERY) * 60000);
     log(`Turgus: ${my.mode === 'manual' ? 'rankinis' : 'prioritetas'} → „${tv.name}“ ${send.join('/')} + grūdai ${crop}`);
-    jset('supplyPlan', { did: String(dest), x: tv.x, y: tv.y, send, crop, route: true });
+    jset('supplyPlan', { did: String(dest), x: tv.x, y: tv.y, send, crop, route: true, bud: true });
     startChore('supply', '/build.php?gid=17&t=5');
     return true;
   }
@@ -2737,7 +2747,7 @@
       <div style="margin-bottom:6px"><b>Prioritetinis kaimas</b> (į jį siunčia visi kaimai su režimu „Auto“):
         <select id="abMkP">${opt(c.prio || '', [['', '– nėra (automatika kaip anksčiau)'], ...vs.map(v => [v.did, v.name])])}</select>
         pildyti iki <input id="abMkF" type="number" min="10" max="100" value="${c.fill || 90}" style="width:50px"> % sandėlio</div>
-      <table style="border-collapse:collapse;width:100%"><tr style="background:#dde6f0"><th style="text-align:left;padding:3px">Kaimas</th><th>Režimas</th><th>Į kurį (rankinis)</th><th>Palikti sau %</th><th>Grūdų palikti %</th><th>Siųsti grūdus</th></tr>
+      <table style="border-collapse:collapse;width:100%"><tr style="background:#dde6f0"><th style="text-align:left;padding:3px">Kaimas</th><th>Režimas</th><th>Į kurį (rankinis)</th><th>Palikti sau %<br><span style="font-weight:normal">gamybos/val.</span></th><th>Grūdų palikti %<br><span style="font-weight:normal">gamybos/val.</span></th><th>Siųsti grūdus</th></tr>
       ${vs.map(v => { const m = cv[v.did] || {}; return `<tr data-did="${v.did}" style="border-top:1px solid #dde"><td style="padding:3px;font-weight:bold">${v.name}</td>
         <td><select class="mkM">${opt(m.mode || 'auto', [['auto', 'Auto'], ['manual', 'Rankinis'], ['off', 'Nesiųsti']])}</select></td>
         <td><select class="mkT">${opt(m.to || '', [['', '–'], ...vs.filter(o => o.did !== v.did).map(o => [o.did, o.name])])}</select></td>
@@ -2746,6 +2756,7 @@
         <td style="text-align:center"><input class="mkG" type="checkbox"${m.crop === false ? '' : ' checked'}></td></tr>`; }).join('')}
       </table>
       <div style="color:#555;margin:6px 0">Auto: jei yra prioritetinis kaimas – siunčia į jį; jei nėra – kaip anksčiau (grandinė ir laukų spurtas). Rankinis: visada į pasirinktą kaimą. Nesiųsti: šis kaimas niekam nesiunčia.
+        „Palikti sau %“ – nuo kaimo VALANDINĖS GAMYBOS (ne nuo sandėlio): pvz. 40 % – kaimas pasilieka 40 % to, ką prigamina, 60 % siunčiama (kaupiama iki ${MKT_BUD_CAP_H} val.; rezervo kariams neliečia).
         Gavėjui pildoma iki nurodyto %, įskaičiuojant pakeliui esančius siuntinius. Į kaimą, į kurį artėja puolimas (≤ 60 min.), nesiunčiama.</div>
       <button id="abMkS" style="padding:3px 10px;background:#357;color:#fff;border:0;border-radius:4px;cursor:pointer">Išsaugoti</button>
       <div style="font-weight:bold;margin:12px 0 3px;border-top:1px solid #dde;padding-top:8px">Siųsti nurodytą kiekį</div>
@@ -2861,6 +2872,7 @@
     if (!p.dump) { const needs = jget('supplyNeeds', {}); delete needs[p.did]; jset('supplyNeeds', needs); }
     { const sl = jget('sentLog', []).filter(e => Date.now() - e.ts < 24 * 3600000); sl.push({ from: String(DID), to: String(p.did || ''), amt: send.slice(0, 4), ts: Date.now() }); jset('sentLog', sl.slice(-60)); }
     if (p.ord) shipOrderSent(p.ord, send.slice(0, 4));
+    if (p.bud) { const b = vget('mktBud', null); if (b && b.r) { b.r = b.r.map((v, k) => Math.max(0, v - (send[k] || 0))); vset('mktBud', b); } }   // išsiųsta gamybos dalis
     log(`${p.dump ? 'Gelbėjimas: ' : ''}Resursai išsiųsti į ${p.x}|${p.y}: mediena ${send[0]}, molis ${send[1]}, geležis ${send[2]}, grūdai ${send[3] || 0}`);
     setStatus(`išsiųsta į ${p.x}|${p.y}: ${send.join(' / ')}`);
     finishChore();
