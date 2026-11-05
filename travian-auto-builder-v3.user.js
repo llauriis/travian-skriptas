@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.45
+// @version      20.46
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -156,9 +156,10 @@
   const RAID_EVERY = [8, 16];       // kas kiek min. bandyti siųsti naują plėšimą
   const RAID_MAX_DIST = 25;         // laukeliai
   const RAID_MIN_EI = 3, RAID_MAX_EI = 15;
+  const ACTIVE_RAID = true, ACTIVE_MAX_DIST = 10, ACTIVE_SCOUT_H = 6, ACTIVE_FRESH_H = 2;   // AKTYVŪS žaidėjai: arti, žvalgoma kas 6 val., puolama tik jei ≤2 val. žvalgyba rodo 0 gynėjų
   const RAID_MIN_POP = 5;          // ir labai maži (mesti startai) – jei gyventojų skaičius nekinta
   const RAID_PROFIT_RATIO = 2;
-  const INF_MIN = 3, INF_MAX = 120;  // pėstininkų (Imperionų/legionierių) reidas į žaidėjo kaimą: nuo–iki
+  const INF_MIN = 3, INF_MAX = 300;  // pėstininkų (Imperionų/legionierių) reidas į žaidėjo kaimą: nuo–iki
   const INF_MAX_DIST = 25;          // pėstininkai lėti, bet pigūs – ir tolimesni kaimai (artimesni vis tiek pirmiau)
   const HERO_CLEAR = true;          // herojus visada eina į „valymo“ puolimus (jei namie ir sveikatos pakanka)
   const SCOUT_FIRST = true;         // į žaidėjų kaimus – tik po žvalgybos
@@ -1834,15 +1835,36 @@
     const farms = jget('farms', {}), raids = jget('raids', {});
     const now = Date.now();
     const cands = Object.values(farms).map(f => ({ ...f, ...farmStatus(f), dist: Math.hypot(f.x - v.x, f.y - v.y), pop: (f.hist[f.hist.length - 1] || [0, 0])[1] }))
-      .filter(f => (f.st === 'NEAKTYVUS' || f.st === 'galbūt neaktyvus' || (f.allyFarm && now - f.allyFarm < 48 * 3600000) || (RAID_NATARS && isNatar(f))) && f.pop >= RAID_MIN_POP && f.dist <= RAID_MAX_DIST && !/WW Village/i.test(f.name || ''))   // natarų kaimai – papildomas šaltinis (žvalgas pirmiau); Pasaulio stebuklo kaimų – NE
-      .filter(f => !isMyAlly(f))                                                                    // savo aljanso – NIEKADA
+      .map(f => ({ ...f, active: !(f.st === 'NEAKTYVUS' || f.st === 'galbūt neaktyvus' || (f.allyFarm && now - f.allyFarm < 48 * 3600000) || (RAID_NATARS && isNatar(f))) }))
+      .filter(f => (!f.active || (ACTIVE_RAID && f.dist <= ACTIVE_MAX_DIST)) && f.pop >= RAID_MIN_POP && f.dist <= RAID_MAX_DIST && !/WW Village/i.test(f.name || ''))   // natarų kaimai – papildomas šaltinis; AKTYVŪS – tik arti ir tik be gynėjų; Pasaulio stebuklo kaimų – NE
+      .filter(f => !isMyAlly(f))                                                                    // savo aljanso ir tavo „nepulti“ sąrašo – NIEKADA
       .filter(f => { const r = raids[f.x + '|' + f.y] || {}; return !scoutBarred(r, f, now) && !crannyBarred(r, f) && !(r.block > now || (r.scoutDead && now < (r.deadUntil || 0))) && (now - (r.last || 0) > (40 + f.dist * 4) * 60000 || (r.scouted && r.scouted === r.last && stockFreshFor(r, f, now))); })   // ką tik žvalgytą (ataskaita gauta) – pulti iškart
       // tikimybė, kad ferma: NEAKTYVUS pirmiau; tada kuo ilgiau neauga ir kuo didesnis/arčiau
       .sort((a, b) => ((b.st === 'NEAKTYVUS' || isNatar(b)) - (a.st === 'NEAKTYVUS' || isNatar(a))) || (farmScore(b) - farmScore(a)));
     // pirmas taikinys, kuriam galima ką nors daryti (žvalgyti ar pulti); kurių žvalgybos ataskaitos laukiam – praleidžiam
     let f = null, r = null, troops = null, infP = null;
+    // AKTYVUS žaidėjas: pulti tik pagal šviežią (≤ ACTIVE_FRESH_H) žvalgybą, kurioje NĖRA gynėjų
+    const activeOk = (c, rc) => !c.active || (rc.scoutRes === 1 && (rc.def === 0 || rc.defUnits === 0) && now - (rc.defTs || 0) < ACTIVE_FRESH_H * 3600000 && now - (rc.stockTs || 0) < ACTIVE_FRESH_H * 3600000);
+    let best1 = null;
+    // 1) PIRMIAU PULTI: taikinys su šviežia žvalgyba, kurį apsimoka plėšti (anksčiau žvalgai eilėje visada būdavo pirmesni – žvalgyti, bet nepulti)
     for (const c of cands) {
       const rc = raids[c.x + '|' + c.y] || { good: 0, bad: 0 };
+      if (!stockFreshFor(rc, c, now) || !activeOk(c, rc)) continue;
+      if (isNatar(c) && !(rc.scoutRes === 1 && now - (rc.defTs || 0) < NATAR_SCOUT_H * 3600000)) continue;
+      const ep = ei >= RAID_MIN_EI && (!(rc.def > 0) || c.active) ? eiRaidPlan(rc, ei) : null;   // EI – tik be gynėjų (kitaip – „numušimas“ žemiau)
+      const ip = c.dist <= INF_MAX_DIST && !isNatar(c) ? infPlan(rc, imp, leg) : null;
+      const pick = ip && (!ep || ip.v > ep.v) ? { ip } : ep ? { ep } : null; if (!pick) continue;
+      const score = (pick.ip || pick.ep).v / (1 + c.dist / 10);           // naudingiausias (grobis − žuvusieji), arčiau – geriau
+      if (!best1 || score > best1.score) best1 = { c, rc, ip: pick.ip || null, score };
+    }
+    if (best1) { f = best1.c; r = best1.rc; infP = best1.ip; }
+    // 2) ŽVALGYTI / kiti atvejai (kaip anksčiau)
+    if (!f) for (const c of cands) {
+      const rc = raids[c.x + '|' + c.y] || { good: 0, bad: 0 };
+      if (c.active) {                                                     // aktyvus – tik žvalgas (kas ACTIVE_SCOUT_H val.), puolama tik per 1) žingsnį
+        if (sc > 0 && now - (rc.scouted || 0) > ACTIVE_SCOUT_H * 3600000) { f = c; r = rc; troops = { t4: 1 }; r.scouted = now; break; }
+        continue;
+      }
       // natarų kariai kaupiasi (kaip gyvūnai oazėse) – žvalgyba sensta greitai: prieš kiekvieną puolimą – šviežia (≤ NATAR_SCOUT_H)
       const freshMs = (isNatar(c) ? NATAR_SCOUT_H : 24) * 3600000;
       const allyFresh = rc.ally && rc.ally.def !== null && now - rc.ally.ts < Math.min(12 * 3600000, freshMs);   // aljansiečių ataskaita – žvalgas nereikalingas
@@ -1863,7 +1885,6 @@
       }
       if (isNatar(c) && !allyFresh && !(rc.scoutRes === 1 && now - (rc.defTs || 0) < freshMs)) continue;   // natarai – be šviežios žvalgybos NEpuolam
       if (rc.scouted && rc.scoutRes === undefined && now - rc.scouted < 90 * 60000) continue;      // laukiam žvalgybos
-      if (VL_ON && !GM_getValue('vlMissing@' + DID, 0) && vlSafe(c, rc, now)) continue;            // saugius (be gynėjų) plėšia Aukso klubo sąrašas „Kaimai“
       if (ei >= RAID_MIN_EI || (inf >= INF_MIN && c.dist <= INF_MAX_DIST)) { f = c; r = rc; break; }
     }
     // nėra ką daryti DABAR (taikinių nėra arba laukiam žvalgybos) – EI gali eiti į tolimesnes tuščias oazes
