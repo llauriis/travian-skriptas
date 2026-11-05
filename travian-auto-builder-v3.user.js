@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.35
+// @version      20.36
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1661,29 +1661,44 @@
   const EI_COST = 1410, BASE_VDEF = 250, RAID_WORTH = 1.5;
   // Žvalgas žuvo: taikinys išimtas 24 val.; po to pulti/žvalgyti vėl tik jei gyventojų skaičius nepadidėjo (kyla – aktyvus žaidėjas su žvalgų gynyba – paliekam)
   // Mažiausias EI kiekis, su kuriuo reidas į šį taikinį apsimoka (0 – neapsimoka niekada)
-  const eiNeedFor = r => { if (!r || !r.stock) return 0; for (let n = RAID_MIN_EI; n <= CLEAR_MAX_EI; n++) if (Math.min(r.stock, n * EI_CARRY) >= RAID_WORTH * eiDeaths(n, r.def) * EI_COST) return n; return 0; };
+  // DIDESNĖ GRUPĖ – MAŽIAU ŽUVUSIŲ: plėšime žūsta n·x/(1+x), x = (D/(n·puolimas))^1.5 → ∝ 1/√n; žaidimas apvalina, todėl pakankamai didelė grupė
+  // dažnai nepraranda NĖ VIENO. Renkamas n, kuriam (grobis − žuvusiųjų kaina) didžiausias; lygiu atveju – mažesnis (kiti kariai lieka kitiems taikiniams)
+  const raidDeaths = (n, att, def) => { const x = Math.pow(((def || 0) * CLEAR_SAFETY + BASE_VDEF) / (n * att), 1.5); return Math.round(n * x / (1 + x)); };   // BASE_VDEF – jau iš ataskaitų
+  function eiRaidPlan(r, avail) {
+    if (!r || !r.stock) return null;
+    let best = null;
+    for (let n = RAID_MIN_EI; n <= Math.min(avail, CLEAR_MAX_EI); n++) {
+      if (n * EI_ATTACK <= (r.def || 0) * CLEAR_SAFETY + BASE_VDEF) continue;    // pralaimėtume
+      const d = raidDeaths(n, EI_ATTACK, r.def), loot = Math.min(r.stock, n * EI_CARRY), v = loot - d * EI_COST;
+      if (loot < RAID_WORTH * d * EI_COST || (!d && loot < Math.min(RAID_MIN_STOCK, r.stock))) continue;
+      if (!best || v > best.v) best = { n, deaths: d, loot, v };
+    }
+    return best;
+  }
+  const eiNeedFor = r => { const p = eiRaidPlan(r, CLEAR_MAX_EI); return p ? p.n : 0; };   // kiek EI reikia geriausiam plėšimui (0 – neapsimoka)
   // PĖSTININKŲ reidas pagal žvalgybos resursus: legionierius kainuoja ~400, imperionas ~600 (EI – 1410), neša po 50.
   // Grąžina { troops, n, loot, deaths } jei apsimoka (grobis ≥ RAID_WORTH × tikėtinas nuostolis), kitaip null
   function infPlan(r, imp, leg) {
     if (!r || !r.stock) return null;
-    const need = Math.ceil(r.stock * STOCK_MARGIN / 50);
-    const n = Math.min(imp + leg, INF_MAX, Math.max(INF_MIN, need)); if (n < INF_MIN) return null;
-    const a = Math.min(imp, n), l = n - a;                                  // imperionai pirmiau (stipresni)
-    const att = a * 70 + l * 40, x = Math.pow(((r.defInf || 0) + BASE_VDEF) / att, 1.5), deaths = Math.max(1, n * x / (1 + x));
-    const unitCost = (a * 600 + l * 400) / n, loot = Math.min(r.stock, n * 50);
-    if (att <= (r.defInf || 0) + BASE_VDEF || loot < RAID_WORTH * deaths * unitCost) return null;
-    const troops = {}; if (a) troops.t3 = a; if (l) troops.t1 = l;
-    return { troops, n, loot, deaths };
+    let best = null;
+    for (let n = INF_MIN; n <= Math.min(imp + leg, INF_MAX); n++) {
+      const a = Math.min(imp, n), l = n - a;                                // imperionai pirmiau (stipresni)
+      const att = a * 70 + l * 40, D = (r.defInf || 0) * CLEAR_SAFETY + BASE_VDEF;
+      if (att <= D) continue;
+      const x = Math.pow(D / att, 1.5), f = x / (1 + x), dA = Math.round(a * f), dL = Math.round(l * f);   // žaidimas apvalina kiekvienam tipui
+      const deaths = dA + dL, lost = dA * 600 + dL * 400, loot = Math.min(r.stock, n * 50), v = loot - lost;
+      if (loot < RAID_WORTH * lost || (!deaths && loot < Math.min(RAID_MIN_STOCK, r.stock))) continue;
+      if (!best || v > best.v) { const troops = {}; if (a) troops.t3 = a; if (l) troops.t1 = l; best = { troops, n, loot, deaths, v }; }
+    }
+    return best;
   }
+
   // EI kaupimas: yra vertas taikinys, bet EI namie per mažai – EI į oazes nesiunčiami, kol susikaups
   const eiHoldNow = () => { const h = (jget('eiHold', {}) || {})[DID]; return h && h.until > Date.now() ? h : null; };
   const scoutBarred = (r, f, now) => !!(r && r.scoutDead && (now < (r.deadUntil || 0) || (f.pop || 0) > (r.deadPop || 0)));
   const eiDeaths = (n, def) => { const x = Math.pow(((def || 0) + BASE_VDEF) / (n * EI_ATTACK), 1.5); return Math.max(1, n * x / (1 + x)); };
   const stockFreshFor = (r, f, now) => r && r.stock !== undefined && r.stockV === 2 && now - (r.stockTs || 0) < (isNatar(f) ? NATAR_SCOUT_H : r.stock < 500 ? 12 : 6) * 3600000 && (r.last || 0) <= (r.stockTs || 0) + 5000;   // beveik viskas slėptuvėse – žvalgom rečiau (12 val.)
-  const worthRaid = (r, nMax) => {
-    const n = Math.min(nMax, CLEAR_MAX_EI, Math.max(RAID_MIN_EI, Math.ceil(r.stock * STOCK_MARGIN / EI_CARRY)));
-    return Math.min(r.stock, n * EI_CARRY) >= RAID_WORTH * eiDeaths(n, r.def) * EI_COST;
-  };
+  const worthRaid = (r, nMax) => !!eiRaidPlan(r, nMax);
   async function reportStock(href) {
     try {
       const d = await repDoc(href); if (!d) return null;
@@ -1805,7 +1820,7 @@
       if (!r.scouted && !(r.ally && r.ally.def !== null) && SCOUT_FIRST) { return false; }   // be žvalgybos (savo ar aljanso) nepuolam
       const stockFresh = r.stock !== undefined && r.stockV === 2 && now - (r.stockTs || 0) < (isNatar(f) ? NATAR_SCOUT_H : 6) * 3600000;
       if (stockFresh && r.stock < RAID_MIN_STOCK && !r.clear) { r.block = now + 90 * 60000; raids[k] = r; jset('raids', raids); log(`Taikinys ${k}: resursų tik ${r.stock} – neapsimoka, pauzė 90 min`); return false; }
-      const need = stockFresh ? Math.ceil(r.stock * STOCK_MARGIN / EI_CARRY) : 0;        // tiek EI, kad vienu kartu išneštų viską
+      const need = stockFresh ? Math.max(Math.ceil(r.stock * STOCK_MARGIN / EI_CARRY), (eiRaidPlan(r, ei) || {}).n || 0) : 0;   // išneštų viską IR žūtų kuo mažiau (didesnė grupė)
       const base = Math.min(need ? CLEAR_MAX_EI : RAID_MAX_EI, Math.max(RAID_MIN_EI, need || Math.ceil(f.pop / 25)));
       if (r.def > 0 && now - (r.defTs || 0) < (isNatar(f) ? NATAR_SCOUT_H : 24) * 3600000) {
         // žinoma gynyba iš žvalgybos: mažiausias EI kiekis, kuris laimi be (ar beveik be) nuostolių; neužtenka – laukiam daugiau EI
@@ -2611,6 +2626,7 @@
     }
     jset('shipOrders', list);
   }
+  const MKT_OVER_PCT = 0.5;          // sandėlis virš 50 %, o kaime nėra ką statyti – perteklius siunčiamas ir iš atsargų
   const MKT_BUD_CAP_H = 6;           // siuntimui skirta gamybos dalis kaupiama daugiausia tiek valandų
   function routeSend(dest, my, mc) {
     const now = Date.now();
@@ -2632,7 +2648,10 @@
     const h = Math.max(0, Math.min(now - (b.ts || now), MKT_BUD_CAP_H * 3600000)) / 3600000;
     b.r = b.r.map((v, k) => Math.min(v + Math.max(0, prod[k]) * share[k] * h, Math.max(0, prod[k]) * share[k] * MKT_BUD_CAP_H)); b.ts = now; vset('mktBud', b);
     const tres = trainReserve();                                             // rezervo kariams neliečiam
-    const can = k => Math.max(0, Math.min(room[k], Math.floor(b.r[k]), Math.floor(st.have[k] - tres[k])));
+    // APSAUGA: sandėlis > MKT_OVER_PCT, o kaimas dabar nieko nestato (ir rezervas kariams jau atidėtas) – perteklius virš ribos irgi siunčiamas
+    const idle = now - (vget('bIdleTs', 0) || 0) < 15 * 60000;
+    const over = k => idle && (k < 3 || my.crop !== false) ? Math.max(0, Math.floor(st.have[k] - MKT_OVER_PCT * (k < 3 ? st.cw : st.cg) - tres[k])) : 0;
+    const can = k => Math.max(0, Math.min(room[k], Math.max(Math.floor(b.r[k]), over(k)), Math.floor(st.have[k] - tres[k])));
     const send = [0, 1, 2].map(can);
     const crop = my.crop === false ? 0 : can(3);
     if (send.reduce((a, x) => a + x, 0) + crop < SUPPLY_MIN) { setStatus(`turgus → „${tv.name}“: kaupiama siuntimui ${b.r.map(Math.round).join('/')} (gamybos dalis)`); return false; }
@@ -2760,7 +2779,7 @@
         <td style="text-align:center"><input class="mkG" type="checkbox"${m.crop === false ? '' : ' checked'}></td></tr>`; }).join('')}
       </table>
       <div style="color:#555;margin:6px 0">Auto: jei yra prioritetinis kaimas – siunčia į jį; jei nėra – kaip anksčiau (grandinė ir laukų spurtas). Rankinis: visada į pasirinktą kaimą. Nesiųsti: šis kaimas niekam nesiunčia.
-        „Palikti sau %“ – nuo kaimo VALANDINĖS GAMYBOS (ne nuo sandėlio): pvz. 40 % – kaimas pasilieka 40 % to, ką prigamina, 60 % siunčiama (kaupiama iki ${MKT_BUD_CAP_H} val.; rezervo kariams neliečia).
+        „Palikti sau %“ – nuo kaimo VALANDINĖS GAMYBOS (ne nuo sandėlio): pvz. 40 % – kaimas pasilieka 40 % to, ką prigamina, 60 % siunčiama (kaupiama iki ${MKT_BUD_CAP_H} val.; rezervo kariams neliečia). Be to, jei sandėlis > ${Math.round(MKT_OVER_PCT * 100)} % ir kaime dabar nėra ką statyti – siunčiamas ir perteklius virš ${Math.round(MKT_OVER_PCT * 100)} %.
         Gavėjui pildoma iki nurodyto %, įskaičiuojant pakeliui esančius siuntinius. Į kaimą, į kurį artėja puolimas (≤ 60 min.), nesiunčiama.</div>
       <button id="abMkS" style="padding:3px 10px;background:#357;color:#fff;border:0;border-radius:4px;cursor:pointer">Išsaugoti</button>
       <div style="font-weight:bold;margin:12px 0 3px;border-top:1px solid #dde;padding-top:8px">Siųsti nurodytą kiekį</div>
@@ -4861,6 +4880,7 @@
     const fcW = (() => { const e = document.getElementById('stockBarFreeCrop'); const v = e ? parseInt(clean(e.textContent).replace(/[^\d-]/g, ''), 10) : NaN; return isNaN(v) ? null : v; })();
     const cropOnly = !GM_getValue('buildOn', true) && fcW !== null && fcW < WAR_CROP_MIN;
     if (!GM_getValue('buildOn', true) && !cropOnly && !myOrders().length) {
+      vset('bIdleTs', Date.now());                                         // statybų nėra – sandėlio perteklius gali keliauti turgumi
       if (maybeChores()) return;
       setStatus('statybos išjungtos (karo režimas) – laukiu darbų');
       return scheduleNext(rand(3, 6));
@@ -4877,6 +4897,7 @@
 
     const qLen = document.querySelectorAll('.buildingList ul li').length;
     if (qLen >= (ROMAN ? 3 : 1)) {
+      vset('bIdleTs', Date.now());                                         // eilė pilna – dabar statyti nėra ką
       const m = minTimer();
       if (maybeChores()) return;
       setStatus('eilė pilna, laukiama');
@@ -4933,6 +4954,7 @@
     const bFirst = (whFill >= LANE_SPLIT) !== (Math.random() < 0.15);
     const a = (d.building && d.field) ? (bFirst ? d.building : d.field) : (d.building || d.field);
     if (!a) {
+      vset('bIdleTs', Date.now());                                         // šiuo metu nieko nestato
       if (!d.complete) GM_setValue('starvedTs', Date.now());   // nėra ką statyti (trūksta resursų) – herojus dirba resursams
       if (maybeChores()) return;
       if (wakeActive() && wakeFinish()) return;                         // nakties serija: viskas padaryta → miegoti
