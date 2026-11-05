@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.30
+// @version      20.31
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -320,7 +320,9 @@
   const MAIN_OVER_FIELDS = 3;       // užpildas: Gyvenamasis ne aukščiau nei vidutinis laukų lygis + 3 (laukai 5 → iki 8)
   const MAIN_FILL_MAX = 15;          // Gyvenamasis pastatas kaip užpildas – iki šio lygio (pirmiausia už kitus užpildus)
   const MARKET_MAX = 15;            // turgus visuose kaimuose – iki 15 (plane ir kaip užpildas, kai nėra ką statyti)
-  const RES_MAIN_MAX = 15;          // fermų (RESOURCE: 3-as, 4-as… kaimas) Gyvenamasis pastatas – ne aukščiau
+  const RES_MAIN_MAX = 10;          // fermų (RESOURCE: 3-as, 4-as… kaimas) Gyvenamasis pastatas – ne aukščiau
+  const MAIN_MAX = 15;              // 1-as ir 2-as kaimas (Krapštaliukai, 1c) – Gyvenamasis ne aukščiau
+  const mainMax = () => ROLE === 'RESOURCE' ? RES_MAIN_MAX : MAIN_MAX;
   const FILLER_MAX_LVL = 10;        // tik iki tokio lygio (pigūs)          // jei laisvų grūdų (+/val.) mažiau – skubiai kelti grūdų lauką, nepaisant plano
   // Bendra pirmo kaimo dalis po 2 kaimo (Unofficial Travian „Developing your first villages“ + karinis kaimas)
   const POST_SETTLE = [
@@ -1040,7 +1042,7 @@
     let raceCut = Infinity;
     if (RACE_MODE) {
       const unfinished = [];
-      PLAN.forEach((st, i) => { if (st.b && !(st.early && !EARLY_RESIDENCE) && B[st.b] && bInfo(builds, B[st.b].gid).eff < st.l) unfinished.push(i); });
+      PLAN.forEach((st, i) => { if (st.b && !(st.early && !EARLY_RESIDENCE) && B[st.b] && bInfo(builds, B[st.b].gid).eff < (st.b === 'MAIN' ? Math.min(st.l, mainMax()) : (st.b === 'RESIDENCE' || st.b === 'PALACE') ? Math.min(st.l, EXPANSION_MAX_LVL) : st.l)) unfinished.push(i); });   // apriboti žingsniai (Gyvenamasis, Rezidencija) neblokuoja laukų
       raceCut = unfinished.length > RACE_FIELD_AHEAD ? unfinished[RACE_FIELD_AHEAD] : Infinity;   // laukai gali bėgti keliais pastatų žingsniais pirmiau
     }
     // Romėnai stato dvi linijas vienu metu: jei laukų linijai iki lenktynių ribos nebėra darbo, antru ėjimu imami tolesni laukų žingsniai –
@@ -1054,7 +1056,7 @@
       if (FOCUS && (step.f || step.b !== 'RESIDENCE' || eiRush())) continue;
       if ((step.b === 'RESIDENCE' || step.b === 'PALACE') && step.l > EXPANSION_MAX_LVL) continue;   // Rezidencija/Rūmai – ne aukščiau 10
       let stepL = step.l;
-      if (step.b === 'MAIN' && ROLE === 'RESOURCE') { if (step.l > RES_MAIN_MAX && bInfo(builds, 15).eff >= RES_MAIN_MAX) continue; stepL = Math.min(stepL, RES_MAIN_MAX); }   // fermų kaimuose Gyvenamasis – iki RES_MAIN_MAX
+      if (step.b === 'MAIN') { const mm = mainMax(); if (step.l > mm && bInfo(builds, 15).eff >= mm) continue; stepL = Math.min(stepL, mm); }   // Gyvenamasis: fermose iki 10, 1–2 kaime iki 15
       if (EARLY && step.b && step.b !== 'MAIN' && step.l > EARLY_BLD_MAX) {
         const curL = B[step.b] ? bInfo(builds, B[step.b].gid).eff : 0;
         if (curL >= EARLY_BLD_MAX) continue;                           // šis žingsnis – vėliau, kai laukai pakils
@@ -1130,7 +1132,7 @@
         // Pirmenybė Gyvenamajam pastatui (gid 15): jis greitina visas statybas, todėl laisvas pastatų linijos laikas pirmiausia jam
         // …bet tik tiek, kiek leidžia laukai: Gyvenamasis ≤ vidutinis medienos/molio/geležies laukų lygis + MAIN_OVER_FIELDS (kitaip per brangus)
         const rf = fields.filter(f => f.gid !== 4), avgF = rf.length ? rf.reduce((a, f) => a + effLvl(f), 0) / rf.length : 0;
-        const mainCap = Math.min(MAIN_FILL_MAX, Math.floor(avgF) + MAIN_OVER_FIELDS, ROLE === 'RESOURCE' ? RES_MAIN_MAX : 99);
+        const mainCap = Math.min(MAIN_FILL_MAX, Math.floor(avgF) + MAIN_OVER_FIELDS, mainMax());
         const mainB = builds.find(x => x.gid === 15 && x.good && !x.uc && x.lvl < mainCap && !isSkipped('fill' + x.slot));
         const whF = Math.max(have[0], have[1], have[2]) / (caps.w || 1);
         const fill = mainB || (whF >= LANE_SPLIT) && builds.filter(x => x.gid > 0 && x.good && !x.uc && FILLER_GIDS.includes(x.gid) && !(x.gid === 23 && crannyOff()) && x.lvl < (EARLY ? Math.min(EARLY_BLD_MAX, FILLER_MAX_LVL) : (x.gid === 17 ? MARKET_MAX : FILLER_MAX_LVL)) && !isSkipped('fill' + x.slot))
