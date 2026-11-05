@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.29
+// @version      20.30
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -320,7 +320,7 @@
   const MAIN_OVER_FIELDS = 3;       // užpildas: Gyvenamasis ne aukščiau nei vidutinis laukų lygis + 3 (laukai 5 → iki 8)
   const MAIN_FILL_MAX = 15;          // Gyvenamasis pastatas kaip užpildas – iki šio lygio (pirmiausia už kitus užpildus)
   const MARKET_MAX = 15;            // turgus visuose kaimuose – iki 15 (plane ir kaip užpildas, kai nėra ką statyti)
-  const RES_MAIN_MAX = 10;          // fermų (RESOURCE: 3-as, 4-as… kaimas) Gyvenamasis pastatas – ne aukščiau
+  const RES_MAIN_MAX = 15;          // fermų (RESOURCE: 3-as, 4-as… kaimas) Gyvenamasis pastatas – ne aukščiau
   const FILLER_MAX_LVL = 10;        // tik iki tokio lygio (pigūs)          // jei laisvų grūdų (+/val.) mažiau – skubiai kelti grūdų lauką, nepaisant plano
   // Bendra pirmo kaimo dalis po 2 kaimo (Unofficial Travian „Developing your first villages“ + karinis kaimas)
   const POST_SETTLE = [
@@ -1054,7 +1054,7 @@
       if (FOCUS && (step.f || step.b !== 'RESIDENCE' || eiRush())) continue;
       if ((step.b === 'RESIDENCE' || step.b === 'PALACE') && step.l > EXPANSION_MAX_LVL) continue;   // Rezidencija/Rūmai – ne aukščiau 10
       let stepL = step.l;
-      if (step.b === 'MAIN' && ROLE === 'RESOURCE') { if (step.l > RES_MAIN_MAX && bInfo(builds, 15).eff >= RES_MAIN_MAX) continue; stepL = Math.min(stepL, RES_MAIN_MAX); }   // fermų kaimuose Gyvenamasis – iki 10
+      if (step.b === 'MAIN' && ROLE === 'RESOURCE') { if (step.l > RES_MAIN_MAX && bInfo(builds, 15).eff >= RES_MAIN_MAX) continue; stepL = Math.min(stepL, RES_MAIN_MAX); }   // fermų kaimuose Gyvenamasis – iki RES_MAIN_MAX
       if (EARLY && step.b && step.b !== 'MAIN' && step.l > EARLY_BLD_MAX) {
         const curL = B[step.b] ? bInfo(builds, B[step.b].gid).eff : 0;
         if (curL >= EARLY_BLD_MAX) continue;                           // šis žingsnis – vėliau, kai laukai pakils
