@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.41
+// @version      20.42
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -4145,8 +4145,15 @@
     return Date.now() - (GM_getValue('oasisNoneTs', 0) || 0) < 25 * 60000;
   }
 
+  // Herojaus namų kaimas: šoninėje juostoje herojaus nuoroda („.heroStatus“) veda į jo kaimo Susibūrimo vietą (newdid=…)
+  function heroHomeVil() {
+    const a = heroAtHome() && document.querySelector('.heroStatus a[href*="newdid="]');
+    const m = a && (a.getAttribute('href') || '').match(/newdid=(\d+)/);
+    if (m) { if (GM_getValue('heroHomeDid', '') !== m[1]) log('Herojaus kaimas:', m[1]); GM_setValue('heroHomeDid', m[1]); return m[1]; }
+    return String(GM_getValue('heroHomeDid', '') || '');
+  }
   function oasisChore() {
-    if (ROLE !== 'RESOURCE_START') return false;                        // herojus gyvena 1 kaime – oazės siunčiamos tik iš ten
+    { const hv = heroHomeVil(); if (hv ? String(DID) !== hv : ROLE !== 'RESOURCE_START') return false; }   // oazės – tik iš to kaimo, kur gyvena herojus (anksčiau – visada iš 1 kaimo: herojus perkeltas į 1c – nebuvo siunčiamas)
     if (attackInMin() < HOLD_HERO_OASIS_MIN || heroHold()) return false;
     const starved = Date.now() - (GM_getValue('starvedTs', 0) || 0) < 3 * 60000;
     const due = Date.now() >= (GM_getValue('oasisNext', 0) || 0) || (starved && Date.now() - (GM_getValue('oasisLast', 0) || 0) > 3 * 60000);
@@ -4893,7 +4900,7 @@
       const hero = document.querySelector('input[name="troop[t11]"]');
       const radio = [3, 4].map(v => document.querySelector(`input[name=eventType][value="${v}"]`)).find(r => r && !r.disabled);
       const ok = document.querySelector('form button[name=ok], form button[type=submit]');
-      if (!t || !hero || !radio || !ok || hero.disabled) { setStatus('oazės: siuntimo forma kitokia – nesiunčiu'); return finishChore(); }
+      if (!t || !hero || !radio || !ok || hero.disabled) { setStatus(hero && hero.disabled ? 'oazės: herojaus šiame kaime nėra – kitą kartą siųsiu iš jo kaimo' : 'oazės: siuntimo forma kitokia – nesiunčiu'); if (hero && hero.disabled && GM_getValue('heroHomeDid', '') === String(DID)) GM_setValue('heroHomeDid', ''); GM_setValue('oasisNext', 0); return finishChore(); }
       setV(hero, '1');
       await sleep(rand(600, 1500));
       if (t.ei > 0) {
