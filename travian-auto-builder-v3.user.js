@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.54
+// @version      20.55
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -3051,6 +3051,35 @@
       box.remove();
     };
   }
+  // ---- PERPILDYMO APSAUGA: kaimas pilnas ≥ OVF_SEND – perteklius virš OVF_KEEP keliauja į HAMMER kaimą; HAMMER kaime (ar kai nusiųsti nepavyksta) –
+  //      iš pertekliaus iš karto treniruojami kariai (nesvarbu, kokia ilga eilė ar pasiekti tikslai). Svarbiausia – kad resursai neišbėgtų per kraštus ----
+  const OVF_SEND = 0.85, OVF_KEEP = 0.70, OVF_TRAIN_H = 0.85, OVF_TRAIN = 0.92;
+  function ovfChore() {
+    if (Date.now() < (vget('ovfNext', 0) || 0)) return false;
+    const st = stockInfo(); if (!st.cw || !st.cg) return false;
+    const fill = st.have.map((h, k) => h / (k < 3 ? st.cw : st.cg)), top = Math.max(...fill);
+    if (top < Math.min(OVF_SEND, OVF_TRAIN_H)) return false;
+    vset('ovfNext', Date.now() + rand(4, 8) * 60000);
+    const vs = ownVillageList(), hd = (vs.find(v => roleOf(v.did) === 'HAMMER') || {}).did;
+    if (ROLE !== 'HAMMER' && hd && top >= OVF_SEND && !attackSoon(String(hd), 60)) {
+      const tv = vs.find(v => v.did === hd), t = (jget('villStock', {}) || {})[hd], now = Date.now(), sent = [0, 0, 0, 0];
+      for (const e of jget('sentLog', [])) if (e.to === String(hd) && now - e.ts < 60 * 60000) e.amt.forEach((a, i) => (sent[i] += a || 0));
+      const room = [0, 1, 2, 3].map(k => t && now - t.ts < 3 * 3600000 ? Math.max(0, Math.floor(0.95 * (k < 3 ? t.cw : t.cg) - t.have[k] - sent[k])) : 1e9);
+      const send = [0, 1, 2, 3].map(k => Math.max(0, Math.min(room[k], Math.floor(st.have[k] - OVF_KEEP * (k < 3 ? st.cw : st.cg)))));
+      if (tv && tv.x !== null && send.reduce((a, b) => a + b, 0) >= SUPPLY_MIN) {
+        log(`PERPILDYMAS (${Math.round(top * 100)} %): perteklius ${send.join('/')} → HAMMER „${tv.name}“`);
+        setStatus(`perpildymas ${Math.round(top * 100)} % – siunčiu į „${tv.name}“`);
+        jset('supplyPlan', { did: String(hd), x: tv.x, y: tv.y, send: send.slice(0, 3), crop: send[3], route: true });
+        startChore('supply', '/build.php?gid=17&t=5');
+        return true;
+      }
+    }
+    if (top >= (ROLE === 'HAMMER' ? OVF_TRAIN_H : OVF_TRAIN)) {
+      const tc = trainCfgFor(DID);
+      if (tc.mode === 'custom') { log(`PERPILDYMAS (${Math.round(top * 100)} %): kariai iš pertekliaus`); return trainCustom(tc, true); }
+    }
+    return false;
+  }
   function supplyChore() {
     noteStock();
     if (shipOrderChore()) return true;                                     // tavo nurodyti kiekiai – pirmiau už viską
@@ -4085,9 +4114,9 @@
     for (const [u] of units) if (spent[u] == null) spent[u] = Math.max(0, base - 1);   // naujas tipas – vos mažiau už mažiausią (pirmas eina jis, paskui – lygiai)
     return units.slice().sort((a, b) => spent[a[0]] - spent[b[0]])[0];
   }
-  function trainCustom(tc) {
+  function trainCustom(tc, ovf = false) {
     if (!GM_getValue('trainOn', true)) return false;
-    if (Date.now() < (vget('trainNext', 0) || 0)) {                       // eilė į priekį – kai kurio pastato eilė baigiasi, nelaukti įprasto laiko
+    if (!ovf && Date.now() < (vget('trainNext', 0) || 0)) {                       // eilė į priekį – kai kurio pastato eilė baigiasi, nelaukti įprasto laiko
       const ah = +tc.ahead || 0, qE = vget('qEnd', {}) || {};
       const due = ah > 0 && Object.entries(tc.units || {}).some(([uu, m]) => m > 0 && UNITS_R[uu] && Date.now() > (vget('qChk', 0) || 0) && (qE[UNITS_R[uu].g] || 0) - Date.now() < ah * 60000 / 2);
       if (!due) return false;
@@ -4095,7 +4124,7 @@
     const fcEl = document.getElementById('stockBarFreeCrop');
     const fc = fcEl ? parseInt(clean(fcEl.textContent).replace(/[^\d-]/g, ''), 10) : 0;
     const lv = vget('blv', {}) || {}, full = vget('trainFull', {}) || {};
-    const units = Object.entries(tc.units || {}).filter(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && !(full[u] > Date.now()));
+    const units = Object.entries(tc.units || {}).filter(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && (ovf || !(full[u] > Date.now())));   // perteklius – nesvarbu tikslai
     if (!units.length) return false;
     const spent = vget('trainSpent', {}) || {};
     // EILĖ Į PRIEKĮ: jei nustatyta (pvz. 30 min.) – pirmiau tas pastatas, kurio eilė trumpiausia ir trumpesnė už nustatytą
@@ -4110,7 +4139,8 @@
     vset('trainSpent', spent);
     const war = !GM_getValue('buildOn', true);                            // karo režimas – treniruoti dažnai ir beveik viskuo
     vset('trainNext', Date.now() + rand(...(war ? [4, 8] : CUSTOM_EVERY)) * 60000);
-    jset('trainPlan', { unit: u, label: UNITS_R[u].n, share: war ? 0.9 : CUSTOM_SHARE, max: war ? 300 : CUSTOM_MAX_BATCH, target, ahead });
+    jset('trainPlan', ovf ? { unit: u, label: UNITS_R[u].n, share: 0.9, max: 500, ahead: 0, ovf: true }      // PERTEKLIUS: kariai iš visko, nesvarbu eilė ir tikslai
+      : { unit: u, label: UNITS_R[u].n, share: war ? 0.9 : CUSTOM_SHARE, max: war ? 300 : CUSTOM_MAX_BATCH, target, ahead });
     startChore('train', '/build.php?gid=' + UNITS_R[u].g);
     return true;
   }
@@ -4395,6 +4425,7 @@
     // Aukcionas baigiasi per kelias minutes – tai skubiausia (eilės ratu laukti negalima, kitaip taikinys pasensta)
     { const t = jget('aucTarget', null);
       if (t && GM_getValue('aucMode', 'test') !== 'off') { jset('aucTarget', null); if (Date.now() - t.ts < 180000) { startChore('auction', t.url); return true; } } }
+    if (ovfChore()) return true;                                            // resursai bėga per kraštus – pirmiausia
     // Užduočių burbulas (!) – surinkti atlygį ir netrukus perkelti iš kuprinės į sandėlį
     if (COLLECT_TASKS && questBadge() && Date.now() >= (GM_getValue('questBadgeNext', 0) || 0)) {
       GM_setValue('questBadgeNext', Date.now() + rand(10, 18) * 60 * 1000);
