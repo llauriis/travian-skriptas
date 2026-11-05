@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.48
+// @version      20.49
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -156,7 +156,8 @@
   const RAID_EVERY = [8, 16];       // kas kiek min. bandyti siųsti naują plėšimą
   const RAID_MAX_DIST = 25;         // laukeliai
   const RAID_MIN_EI = 3, RAID_MAX_EI = 15;
-  const ACTIVE_RAID = true, ACTIVE_MAX_DIST = 10, ACTIVE_SCOUT_H = 6, ACTIVE_FRESH_H = 2;   // AKTYVŪS žaidėjai: arti, žvalgoma kas 6 val., puolama tik jei ≤2 val. žvalgyba rodo 0 gynėjų
+  const SCOUT_EVERY_H = 24;          // to paties kaimo žvalgyba – ne dažniau kaip kas 24 val. (tarp jų – „akli“ reidai, jei gynėjų nebuvo)
+  const ACTIVE_RAID = true, ACTIVE_MAX_DIST = 10, ACTIVE_SCOUT_H = 24, ACTIVE_FRESH_H = 2;   // AKTYVŪS žaidėjai: arti, žvalgoma kas 6 val., puolama tik jei ≤2 val. žvalgyba rodo 0 gynėjų
   const RAID_MIN_POP = 5;          // ir labai maži (mesti startai) – jei gyventojų skaičius nekinta
   const RAID_PROFIT_RATIO = 2;
   const INF_MIN = 3, INF_MAX = 300;  // pėstininkų (Imperionų/legionierių) reidas į žaidėjo kaimą: nuo–iki
@@ -1586,6 +1587,36 @@
     return { att, def, mine: own.some(o => o.x === att.x && o.y === att.y), defOwn: own.some(o => o.x === def.x && o.y === def.y) };
   }
   // Iš ataskaitos (žvalgybos ar puolimo) paimti GYNĖJŲ vienetus: dalis po „Besiginantis/Defender“, ikonų klasės uNN ir pirmoji skaičių eilutė
+  // Mūšio ataskaita: puolėjo išsiųsti ir žuvę (pagal tipą t1..t11), besiginančiųjų skaičius, grobis „nešta/talpa“
+  async function reportBattle(href) {
+    try {
+      const d = await repDoc(href); if (!d) return null;
+      const tbs = [...d.querySelectorAll('table')].filter(t => t.querySelector('tbody.units td.unit'));
+      const rowsOf = t => [...t.querySelectorAll('tbody.units tr')].filter(tr => tr.querySelector('td.unit')).map(tr => [...tr.querySelectorAll('td.unit')].map(td => parseInt(clean(td.textContent).replace(/\D/g, ''), 10) || 0));
+      if (!tbs.length) return null;
+      const a = rowsOf(tbs[0]), sent = a[0] || [], dead = a[1] || [];
+      const defUnits = tbs[1] ? (rowsOf(tbs[1])[0] || []).reduce((x, y) => x + y, 0) : 0;
+      let got = 0, cap = 0;
+      const g = [...d.querySelectorAll('th')].find(e => /^(Grobis|Bounty)$/i.test(e.textContent.trim()));
+      if (g) {
+        const vals = [...g.closest('tr').querySelectorAll('.resourceWrapper .value')].map(e => parseInt(clean(e.textContent).replace(/\D/g, ''), 10) || 0);
+        got = vals.slice(0, 4).reduce((x, y) => x + y, 0);
+        const m = clean(g.closest('tr').textContent).match(/(\d[\d\s.,]*)\s*\/\s*(\d[\d\s.,]*)\s*$/); if (m) cap = parseInt(m[2].replace(/\D/g, ''), 10) || 0;
+      }
+      return { sent, dead, defUnits, got, cap };
+    } catch (e) { return null; }
+  }
+  // Kaimo bazinė gynyba (siena + bazė) iš MŪSŲ reido be gynėjų: žuvo d iš n → x = f/(1−f), D = puolimas·x^(2/3); nežuvo nė vienas → D žemiau ribos
+  const ATT_R = [40, 30, 70, 0, 120, 180, 60, 75, 0, 0];
+  function vdefLearn(st, b) {
+    if (!b || b.defUnits > 0) return;                                     // gynėjai buvo – bazės neįvertinsim
+    let att = 0, n = 0, dd = 0;
+    for (let i = 0; i < 10; i++) { att += (b.sent[i] || 0) * ATT_R[i]; if (ATT_R[i]) { n += b.sent[i] || 0; dd += b.dead[i] || 0; } }
+    if ((b.sent[10] || 0) > 0) att += GM_getValue('heroAttack', 0) || 0;
+    if (!att || !n) return;
+    if (dd > 0) { const f = Math.min(0.9, dd / n), x = f / (1 - f); st.vdef = Math.round(att * Math.pow(x, 2 / 3)); st.vdefMax = null; }
+    else { const x0 = 0.5 / Math.max(0.5, n - 0.5), ub = Math.round(att * Math.pow(x0, 2 / 3)); st.vdefMax = Math.min(st.vdefMax || Infinity, ub); if (st.vdef && st.vdef > ub) st.vdef = ub; }
+  }
   async function reportDefenders(href) {
     try {
       const d = await repDoc(href); if (!d) return null;
@@ -1666,7 +1697,11 @@
       const ic = r.querySelector('.iReport');
       let res = ic ? +((String(ic.className).match(/iReport(\d+)/) || [])[1] || 0) : 0;
       if (res === 15) res = 1; else if (res === 16) res = 2; else if (res === 17) res = 3;   // žvalgybos ataskaitų ikonos
-      if (m[1] === 'raids' || m[1] === 'attacks') st.stockTs = 0;     // po puolimo resursų likutis nežinomas – prieš kitą reidą reikia naujos žvalgybos
+      if (m[1] === 'raids' || m[1] === 'attacks') {
+        st.stockTs = 0;                                                   // po puolimo likutis nežinomas – kitas reidas pagal šį grobį („aklas“, be naujos žvalgybos)
+        const bt = await reportBattle(a);
+        if (bt) { vdefLearn(st, bt); if (repTs >= (st.lastRaidTs || 0)) { st.lastLoot = bt.got; st.lastCap = bt.cap; st.lastRaidTs = repTs; st.lastDefU = bt.defUnits; } }
+      }
       if (res === 1) { st.good++; if (m[1] === 'attacks') { st.clear = false; st.cleared = Date.now(); st.def = 0; } }
       else if (res === 2 && m[1] === 'scouts') { st.bad++; st.block = Date.now() + 24 * 3600000; }
       else if (res === 2) {
@@ -1720,13 +1755,14 @@
   // Mažiausias EI kiekis, su kuriuo reidas į šį taikinį apsimoka (0 – neapsimoka niekada)
   // DIDESNĖ GRUPĖ – MAŽIAU ŽUVUSIŲ: plėšime žūsta n·x/(1+x), x = (D/(n·puolimas))^1.5 → ∝ 1/√n; žaidimas apvalina, todėl pakankamai didelė grupė
   // dažnai nepraranda NĖ VIENO. Renkamas n, kuriam (grobis − žuvusiųjų kaina) didžiausias; lygiu atveju – mažesnis (kiti kariai lieka kitiems taikiniams)
-  const raidDeaths = (n, att, def) => { const x = Math.pow(((def || 0) * CLEAR_SAFETY + BASE_VDEF) / (n * att), 1.5); return Math.round(n * x / (1 + x)); };   // BASE_VDEF – jau iš ataskaitų
+  const vdefOf = r => r && r.vdef != null ? r.vdef * 1.15 : r && r.vdefMax != null ? Math.min(BASE_VDEF, r.vdefMax) : BASE_VDEF;   // šio kaimo bazinė gynyba (išmokta iš mūsų reidų), kitaip – vidurkis
+  const raidDeaths = (n, att, def, vd = BASE_VDEF) => { const x = Math.pow(((def || 0) * CLEAR_SAFETY + vd) / (n * att), 1.5); return Math.round(n * x / (1 + x)); };
   function eiRaidPlan(r, avail) {
     if (!r || !r.stock) return null;
     let best = null;
     for (let n = RAID_MIN_EI; n <= Math.min(avail, CLEAR_MAX_EI); n++) {
-      if (n * EI_ATTACK <= (r.def || 0) * CLEAR_SAFETY + BASE_VDEF) continue;    // pralaimėtume
-      const d = raidDeaths(n, EI_ATTACK, r.def), loot = Math.min(r.stock, n * EI_CARRY), v = loot - d * EI_COST;
+      if (n * EI_ATTACK <= (r.def || 0) * CLEAR_SAFETY + vdefOf(r)) continue;    // pralaimėtume
+      const d = raidDeaths(n, EI_ATTACK, r.def, vdefOf(r)), loot = Math.min(r.stock, n * EI_CARRY), v = loot - d * EI_COST;
       if (loot < RAID_WORTH * d * EI_COST || v <= 0 || loot < RAID_MIN_STOCK) continue;
       if (!best || v > best.v) best = { n, deaths: d, loot, v };
     }
@@ -1740,7 +1776,7 @@
     let best = null;
     for (let n = INF_MIN; n <= Math.min(imp + leg, INF_MAX); n++) {
       const a = Math.min(imp, n), l = n - a;                                // imperionai pirmiau (stipresni)
-      const att = a * 70 + l * 40, D = (r.defInf || 0) * CLEAR_SAFETY + BASE_VDEF;
+      const att = a * 70 + l * 40, D = (r.defInf || 0) * CLEAR_SAFETY + vdefOf(r);
       if (att <= D) continue;
       const x = Math.pow(D / att, 1.5), f = x / (1 + x), dA = Math.round(a * f), dL = Math.round(l * f);   // žaidimas apvalina kiekvienam tipui
       const deaths = dA + dL, lost = dA * 600 + dL * 400, loot = Math.min(r.stock, n * 50), v = loot - lost;
@@ -1847,19 +1883,32 @@
     const activeOk = (c, rc) => !c.active || (rc.scoutRes === 1 && (rc.def === 0 || rc.defUnits === 0) && now - (rc.defTs || 0) < ACTIVE_FRESH_H * 3600000 && now - (rc.stockTs || 0) < ACTIVE_FRESH_H * 3600000);
     let best1 = null;
     // 1) PIRMIAU PULTI: taikinys su šviežia žvalgyba, kurį apsimoka plėšti (anksčiau žvalgai eilėje visada būdavo pirmesni – žvalgyti, bet nepulti)
+    // „AKLAS“ reidas: per paskutines SCOUT_EVERY_H val. žvalgyba rodė 0 gynėjų – nebežvalgom, siunčiam pagal paskutinį grobį
+    // (pilnas maišas → kitą kartą 1,5× daugiau; ne pilnas → tiek, kiek parnešė); pirmą kartą – pagal žvalgybos resursus
+    const blindStock = (c, rc) => {
+      if (c.active || isNatar(c)) return null;
+      if (rc.scoutRes !== 1 || !(rc.defUnits === 0 || rc.def === 0) || now - (rc.defTs || 0) > SCOUT_EVERY_H * 3600000) return null;
+      if ((rc.lastDefU || 0) > 0 && (rc.lastRaidTs || 0) > (rc.defTs || 0)) return null;               // paskutiniame reide buvo gynėjų – reikia žvalgybos
+      if ((rc.lastRaidTs || 0) > (rc.stockTs || 0) && rc.lastCap) return rc.lastLoot >= 0.95 * rc.lastCap ? Math.round(rc.lastCap * 1.5) : rc.lastLoot;
+      return rc.stockV === 2 ? rc.stock : null;
+    };
     for (const c of cands) {
       const rc = raids[c.x + '|' + c.y] || { good: 0, bad: 0 };
-      if (!stockFreshFor(rc, c, now) || !activeOk(c, rc)) continue;
-      if (isNatar(c) && !(rc.scoutRes === 1 && now - (rc.defTs || 0) < NATAR_SCOUT_H * 3600000)) continue;
-      const ep = ei >= RAID_MIN_EI && (!(rc.def > 0) || c.active) ? eiRaidPlan(rc, ei) : null;   // EI – tik be gynėjų (kitaip – „numušimas“ žemiau)
-      const ip = c.dist <= INF_MAX_DIST && !isNatar(c) ? infPlan(rc, imp, leg) : null;
-      const pick = ip && (!ep || ip.v > ep.v) ? { ip } : ep ? { ep } : null; if (!pick) continue;
-      const score = (pick.ip || pick.ep).v / (1 + c.dist / 10);           // naudingiausias (grobis − žuvusieji), arčiau – geriau
-      if (!best1 || score > best1.score) best1 = { c, rc, ip: pick.ip || null, score };
+      const fresh = stockFreshFor(rc, c, now) && activeOk(c, rc);
+      if (fresh && isNatar(c) && !(rc.scoutRes === 1 && now - (rc.defTs || 0) < NATAR_SCOUT_H * 3600000)) continue;
+      const E = fresh ? rc.stock : blindStock(c, rc);
+      if (E == null || E < RAID_MIN_STOCK) continue;
+      const rr = { ...rc, stock: E };
+      const ep = ei >= RAID_MIN_EI && (!(rc.def > 0) || c.active || !fresh) ? eiRaidPlan(rr, ei) : null;   // EI – tik be gynėjų (kitaip – „numušimas“ žemiau)
+      const ip = c.dist <= INF_MAX_DIST && !isNatar(c) ? infPlan(rr, imp, leg) : null;
+      const pick = ip && (!ep || ip.v > ep.v) ? ip : ep ? { troops: { t5: ep.n }, n: ep.n, loot: ep.loot, deaths: ep.deaths, v: ep.v } : null; if (!pick) continue;
+      const score = pick.v / (1 + c.dist / 10);                            // naudingiausias (grobis − žuvusieji), arčiau – geriau
+      if (!best1 || score > best1.score) best1 = { c, rc, ip: { ...pick, blind: !fresh, est: E }, score };
     }
     if (best1) { f = best1.c; r = best1.rc; infP = best1.ip; }
     // 2) ŽVALGYTI / kiti atvejai (kaip anksčiau)
-    if (!f) for (const c of cands) {
+    const candsB = cands.slice().sort((a, b) => (((raids[a.x + '|' + a.y] || {}).scouted ? 1 : 0) - ((raids[b.x + '|' + b.y] || {}).scouted ? 1 : 0)));   // NAUJI (dar nežvalgyti) – pirmiau
+    if (!f) for (const c of candsB) {
       const rc = raids[c.x + '|' + c.y] || { good: 0, bad: 0 };
       if (c.active) {                                                     // aktyvus – tik žvalgas (kas ACTIVE_SCOUT_H val.), puolama tik per 1) žingsnį
         if (sc > 0 && now - (rc.scouted || 0) > ACTIVE_SCOUT_H * 3600000) { f = c; r = rc; troops = { t4: 1 }; r.scouted = now; break; }
@@ -1868,7 +1917,7 @@
       // natarų kariai kaupiasi (kaip gyvūnai oazėse) – žvalgyba sensta greitai: prieš kiekvieną puolimą – šviežia (≤ NATAR_SCOUT_H)
       const freshMs = (isNatar(c) ? NATAR_SCOUT_H : 24) * 3600000;
       const allyFresh = rc.ally && rc.ally.def !== null && now - rc.ally.ts < Math.min(12 * 3600000, freshMs);   // aljansiečių ataskaita – žvalgas nereikalingas
-      if (!allyFresh && sc > 0 && (!(now - (rc.scouted || 0) < freshMs) || (!stockFreshFor(rc, c, now) && !(rc.scouted && now - rc.scouted < 40 * 60000)))) { f = c; r = rc; troops = { t4: 1 }; r.scouted = now; break; }   // žvalgas: kas 6 val. ir po kiekvieno puolimo (resursų likutis)
+      if (!allyFresh && sc > 0 && now - (rc.scouted || 0) > SCOUT_EVERY_H * 3600000) { f = c; r = rc; troops = { t4: 1 }; r.scouted = now; break; }   // žvalgas – to paties kaimo ne dažniau kaip kas 24 val.   // žvalgas: kas 6 val. ir po kiekvieno puolimo (resursų likutis)
       if ((ei >= RAID_MIN_EI || inf >= INF_MIN) && !allyFresh && !stockFreshFor(rc, c, now)) continue;   // be šviežių resursų žinių – nesiunčiam
       if (stockFreshFor(rc, c, now)) {                                                              // žinomi resursai: EI ar pėstininkai – kas duoda daugiau naudos
         const ep = ei >= RAID_MIN_EI ? eiRaidPlan(rc, ei) : null;
@@ -1899,7 +1948,7 @@
     }
     else if (infP) {                                                      // pėstininkai pagal žvalgybos resursus (EI neapsimokėjo)
       troops = infP.troops;
-      log(`Taikinys ${k}: resursų ${r.stock} → siunčiu ${infP.n} pėstininkų (${Object.entries(troops).map(([u, n]) => n + (u === 't1' ? ' legion.' : ' imperion.')).join(', ')}), grobis ~${infP.loot}, žus ~${infP.deaths.toFixed(1)}`);
+      log(`Taikinys ${k}: ${infP.blind ? `be naujos žvalgybos, tikėtina ~${infP.est}` : `resursų ${r.stock}`} → siunčiu ${Object.entries(troops).map(([u, n]) => n + (u === 't1' ? ' legion.' : u === 't5' ? ' EI' : ' imperion.')).join(', ')}, grobis ~${infP.loot}, žus ~${infP.deaths}`);
     }
     else if (ei >= RAID_MIN_EI && worthRaid(r, ei)) {
       if (!r.scouted && !(r.ally && r.ally.def !== null) && SCOUT_FIRST) { return false; }   // be žvalgybos (savo ar aljanso) nepuolam
