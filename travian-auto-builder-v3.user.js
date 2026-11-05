@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.49
+// @version      20.50
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1720,9 +1720,14 @@
       else if (res === 3) { st.bad += 3; st.clear = false; st.block = Date.now() + 48 * 3600000; }   // visi žuvo – gynyba per stipri
       if (st.bad >= 3 && st.bad > 2 * st.good) st.block = Date.now() + 24 * 3600000;
       if (m[1] === 'scouts' && res === 3) {                               // žvalgas žuvo (gynėjai turi žvalgų gynybos): taikinys išimamas 24 val.; po to – tik jei gyventojų nebeaugo
-        const fm = jget('farms', {})[k], pop = fm && fm.hist && fm.hist.length ? (fm.hist[fm.hist.length - 1] || [0, 0])[1] : 0;
-        st.scoutDead = true; st.deadPop = pop; st.deadUntil = repTs + 24 * 3600000; st.block = st.deadUntil; st.bad = Math.max(0, st.bad - 3);
-        log(`Žvalgas žuvo ${k} (gyv. ${pop}): taikinys išimtas 24 val.; vėliau – tik jei populiacija neaugo`);
+        const farmsAll = jget('farms', {}), fm = farmsAll[k], lastPop = x => x && x.hist && x.hist.length ? (x.hist[x.hist.length - 1] || [0, 0])[1] : 0, pop = lastPop(fm);
+        // AKTYVUS žaidėjas (turi aljansą ar kelis kaimus) – kaimas išimamas SAVAITEI; anksčiau – tik jei NEAUGO NĖ VIENO jo kaimo populiacija
+        const pl = fm ? String(fm.player || '') : '', pv = pl ? Object.entries(farmsAll).filter(([, x]) => String(x.player || '') === pl) : [];
+        const actP = !!(fm && (tagNorm(fm.ally) || pv.length >= 2));
+        st.scoutDead = true; st.deadPop = pop; st.deadTs = repTs; st.deadPlayer = pl; st.deadActive = actP;
+        st.deadPops = Object.fromEntries(pv.map(([pk, x]) => [pk, lastPop(x)]));
+        st.deadUntil = repTs + (actP ? 7 * 24 : 24) * 3600000; st.block = st.deadUntil; st.bad = Math.max(0, st.bad - 3);
+        log(`Žvalgas žuvo ${k} (${pl || '?'}${fm && fm.ally ? ' [' + strip0(fm.ally) + ']' : ''}, kaimų ${pv.length}, gyv. ${pop}): taikinys išimtas ${actP ? '7 d. (aktyvus žaidėjas; anksčiau – tik jei neaugs nė vienas jo kaimas)' : '24 val.'}`);
       }
       if (m[1] === 'scouts') {
         st.scoutRes = res;
@@ -1788,7 +1793,15 @@
 
   // EI kaupimas: yra vertas taikinys, bet EI namie per mažai – EI į oazes nesiunčiami, kol susikaups
   const eiHoldNow = () => { const h = (jget('eiHold', {}) || {})[DID]; return h && h.until > Date.now() ? h : null; };
-  const scoutBarred = (r, f, now) => !!(r && r.scoutDead && (now < (r.deadUntil || 0) || (f.pop || 0) > (r.deadPop || 0)));
+  const strip0 = t => String(t || '').replace(/<[^>]*>/g, '').trim();
+  // žaidėjo, kurio kaime žuvo žvalgas, NĖ VIENO kaimo populiacija neaugo nuo žūties (ir praėjo ≥ 24 val.) – tikėtina neaktyvus
+  const playerStill = (r, now) => {
+    if (!r.deadPlayer || !r.deadPops || now - (r.deadTs || 0) < 24 * 3600000) return false;
+    const farms = jget('farms', {}), lastPop = x => x && x.hist && x.hist.length ? (x.hist[x.hist.length - 1] || [0, 0])[1] : 0;
+    const pv = Object.entries(farms).filter(([, x]) => String(x.player || '') === r.deadPlayer);
+    return pv.length > 0 && pv.every(([pk, x]) => r.deadPops[pk] !== undefined && lastPop(x) <= r.deadPops[pk]);
+  };
+  const scoutBarred = (r, f, now) => !!(r && r.scoutDead && (now < (r.deadUntil || 0) ? !(r.deadActive && playerStill(r, now)) : (f.pop || 0) > (r.deadPop || 0)));
   const eiDeaths = (n, def) => { const x = Math.pow(((def || 0) + BASE_VDEF) / (n * EI_ATTACK), 1.5); return Math.max(1, n * x / (1 + x)); };
   const stockFreshFor = (r, f, now) => r && r.stock !== undefined && r.stockV === 2 && now - (r.stockTs || 0) < (isNatar(f) ? NATAR_SCOUT_H : r.stock < 500 ? 12 : 6) * 3600000 && (r.last || 0) <= (r.stockTs || 0) + 5000;   // beveik viskas slėptuvėse – žvalgom rečiau (12 val.)
   const worthRaid = (r, nMax) => !!eiRaidPlan(r, nMax);
@@ -1874,7 +1887,7 @@
       .map(f => ({ ...f, active: !(f.st === 'NEAKTYVUS' || f.st === 'galbūt neaktyvus' || (f.allyFarm && now - f.allyFarm < 48 * 3600000) || (RAID_NATARS && isNatar(f))) }))
       .filter(f => (!f.active || (ACTIVE_RAID && f.dist <= ACTIVE_MAX_DIST)) && f.pop >= RAID_MIN_POP && f.dist <= RAID_MAX_DIST && !/WW Village/i.test(f.name || ''))   // natarų kaimai – papildomas šaltinis; AKTYVŪS – tik arti ir tik be gynėjų; Pasaulio stebuklo kaimų – NE
       .filter(f => !isMyAlly(f))                                                                    // savo aljanso ir tavo „nepulti“ sąrašo – NIEKADA
-      .filter(f => { const r = raids[f.x + '|' + f.y] || {}; return !scoutBarred(r, f, now) && !crannyBarred(r, f) && !(r.block > now || (r.scoutDead && now < (r.deadUntil || 0))) && (now - (r.last || 0) > (40 + f.dist * 4) * 60000 || (r.scouted && r.scouted === r.last && stockFreshFor(r, f, now))); })   // ką tik žvalgytą (ataskaita gauta) – pulti iškart
+      .filter(f => { const r = raids[f.x + '|' + f.y] || {}; const deathHold = r.scoutDead && now < (r.deadUntil || 0) && !(r.deadActive && playerStill(r, now)), otherBlock = r.block > now && r.block !== r.deadUntil; return !scoutBarred(r, f, now) && !crannyBarred(r, f) && !deathHold && !otherBlock && (now - (r.last || 0) > (40 + f.dist * 4) * 60000 || (r.scouted && r.scouted === r.last && stockFreshFor(r, f, now))); })   // ką tik žvalgytą (ataskaita gauta) – pulti iškart
       // tikimybė, kad ferma: NEAKTYVUS pirmiau; tada kuo ilgiau neauga ir kuo didesnis/arčiau
       .sort((a, b) => ((b.st === 'NEAKTYVUS' || isNatar(b)) - (a.st === 'NEAKTYVUS' || isNatar(a))) || (farmScore(b) - farmScore(a)));
     // pirmas taikinys, kuriam galima ką nors daryti (žvalgyti ar pulti); kurių žvalgybos ataskaitos laukiam – praleidžiam
