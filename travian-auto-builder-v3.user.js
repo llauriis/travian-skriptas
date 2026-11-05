@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.34
+// @version      20.35
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -99,7 +99,7 @@
   const OASIS_MIN_HEALTH = 25;      // nesiųsti, jei sveikata mažesnė (prognozė vis tiek turi palikti ≥ OASIS_KEEP_HEALTH)
   const OASIS_KEEP_HEALTH = 20;     // po kovos turi likti bent tiek sveikatos (prognozuojant – su atsarga nuo mirties)
   // Karžygio nustatymai (langas „Karžygys“, GM heroCfg) – numatytieji iš konstantų aukščiau
-  const hc = () => ({ oasisMin: OASIS_MIN_HEALTH, oasisKeep: OASIS_KEEP_HEALTH, oasisMaxLoss: OASIS_MAX_LOSS, advMin: HERO_MIN_HEALTH, clear: HERO_CLEAR, adv: HERO_ADVENTURES, defHelp: true, ...(jget('heroCfg', {}) || {}) });
+  const hc = () => ({ oasisMin: OASIS_MIN_HEALTH, oasisKeep: OASIS_KEEP_HEALTH, oasisMaxLoss: OASIS_MAX_LOSS, advMin: HERO_MIN_HEALTH, clear: HERO_CLEAR, adv: HERO_ADVENTURES, defHelp: true, hpValue: HERO_HP_VALUE, ...(jget('heroCfg', {}) || {}) });
   const OINTMENT_BELOW = 40;        // sveikata žemiau – naudoti tepalus (po ≤ OINTMENT_MAX_USE), kad herojus galėtų vėl pulti oazę
   const OINTMENT_MAX_USE = 10;      // tepalų vienu kartu – ne daugiau (kad herojus greitai vėl eitų į oazę)
   const OINTMENT_TO = 85;           // tepalai: kai sveikata per maža oazėms – pagydyti iki tiek % (1 tepalas = 1 %)
@@ -111,6 +111,8 @@
   // premija už nukautus gyvūnus (~OASIS_BONUS_PER_UP resursų už 1 gyvūno išlaikymo vnt., iš tavo ataskaitos: 9 vnt. → 1 440) ≥ žuvusių karių kaina
   const OASIS_ARMY = true, OASIS_BONUS_PER_UP = 160, ARMY_MAX_MIN = 20, ARMY_NOHERO_MIN = 50, OASIS_STOCK_GUESS = 400;   // pėstininkai į oazes – iki 20 min. kelio
   const UNIT_ATT_R = { t1: 40, t3: 70, t5: 120 }, UNIT_COST_R = { t1: 400, t3: 600, t5: 1410 };          // daugiausia EI kartu su herojumi
+  const HERO_MOUNTED = true;        // herojus su žirgu – kovoje skaičiuojamas kaip raitelis
+  const HERO_HP_VALUE = 1000;       // 1 % herojaus sveikatos vertė resursais (renkantis, kiek EI siųsti su herojumi; keičiama lange „Karžygys“)
   const OASIS_EI_MAX_DEATHS = 1;    // pirmenybė – kad nežūtų nė vienas; 1 leidžiamas tik jei kitaip oazės nepulsim        // toliausias atstumas, kurį verta ieškoti (laukeliais)
   const OASIS_DETAILS_PER_SCAN = 25;     // kiek oazių su gyvūnais vienu skenavimu patikrinti išsamiai
   const OASIS_WINDOWS_PER_SCAN = 5;      // kiek žemėlapio langų vienu skenavimu
@@ -2003,11 +2005,12 @@
         const k = c.x + '|' + c.y;
         if (!info.free || !info.total) { done[k] = now + 60 * 60000; continue; }
         if (cagesOn && info.animals.some(a => CAGE_ANIMALS.includes(a.u))) { done[k] = now + 3 * 3600000; continue; }   // narvų taikinys – herojui
-        let D = 10, bad = false, ups = 0;
-        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { bad = true; break; } D += a.n * Math.max(st.d[0], st.d[1]); ups += a.n * st.up; }
+        let D = 10, bad = false, ups = 0, DI = 10, DC = 10;
+        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { bad = true; break; } D += a.n * Math.max(st.d[0], st.d[1]); DI += a.n * st.d[0]; DC += a.n * st.d[1]; ups += a.n * st.up; }
+        const Dw = u => { const ai = (u.t1 || 0) * UNIT_ATT_R.t1 + (u.t3 || 0) * UNIT_ATT_R.t3, ac = (u.t5 || 0) * UNIT_ATT_R.t5; return ai + ac ? (DI * ai + DC * ac) / (ai + ac) : D; };   // gynyba pagal puolėjų sudėtį
         let n = 0;
         if (!bad) for (let m = Math.max(EO_GROUP, 2); m <= Math.min(avail, EI_CLEAR_WEAK_MAX); m++) {
-          const x = Math.pow(D / (m * EI_ATTACK), 1.5), lossFrac = x / (1 + x);     // plėšimo nuostolis
+          const x = Math.pow(DC / (m * EI_ATTACK), 1.5), lossFrac = x / (1 + x);    // plėšimo nuostolis (EI – raiteliai: gynyba nuo raitelių)
           if (m * lossFrac < 0.3) { n = m; break; }                                // praktiškai 0 žuvusių
         }
         if (n && useEI) { send(c, n, `silpna oazė (${info.total} gyv.)`); return; }
@@ -2019,14 +2022,14 @@
           const combos = [all, { t5: 0, t3: all.t3, t1: all.t1 }, { t5: all.t5, t3: 0, t1: 0 }].filter(u => u.t5 + u.t3 + u.t1 > 0).filter((u, i2, arr) => arr.findIndex(o => JSON.stringify(o) === JSON.stringify(u)) === i2);
           let bestA = null;
           for (const units of combos) {
-            const att = Object.entries(units).reduce((a2, [u, m]) => a2 + m * UNIT_ATT_R[u], 0);
-            if (att <= D * OASIS_SAFETY) continue;
-            const x = Math.pow(D * OASIS_SAFETY / att, 1.5), lossFrac = x / (1 + x);
+            const att = Object.entries(units).reduce((a2, [u, m]) => a2 + m * UNIT_ATT_R[u], 0), Du = Dw(units);
+            if (att <= Du * OASIS_SAFETY) continue;
+            const x = Math.pow(Du * OASIS_SAFETY / att, 1.5), lossFrac = x / (1 + x);
             const deaths = Object.fromEntries(Object.entries(units).map(([u, m]) => [u, Math.round(m * lossFrac)]));
             const lost = Object.entries(deaths).reduce((a2, [u, d2]) => a2 + d2 * UNIT_COST_R[u], 0);
             const carry = (units.t5 - deaths.t5) * 100 + (units.t3 - deaths.t3 + units.t1 - deaths.t1) * 50;
             const lk = loot[k], stock = lk && lk.got ? Math.max(lk.got, OASIS_STOCK_GUESS) : OASIS_STOCK_GUESS;
-            const killed = 1 / (1 + Math.pow(D / att, 1.5)), bonus = Math.round(OASIS_BONUS_PER_UP * ups * killed);
+            const killed = 1 / (1 + Math.pow(Du / att, 1.5)), bonus = Math.round(OASIS_BONUS_PER_UP * ups * killed);
             const gain = Math.min(carry, stock) + bonus, profit = gain - lost;
             log(`Oazė ${k} (${info.total} gyv.) be herojaus: EI ${units.t5}, imper. ${units.t3}, legion. ${units.t1} – žus ${JSON.stringify(deaths)} (${lost}), grobis ~${gain - bonus} + premija ~${bonus} → ${profit >= 0.5 * lost ? 'tinka' : 'neapsimoka'}`);
             if (profit >= 0.5 * lost && (!bestA || profit > bestA.profit)) bestA = { units, profit, info };
@@ -2657,13 +2660,14 @@
       ${row('Nuotykiai', chk('hcAdv', c.adv) + ' tik kai sveikata ≥ ' + numI('hcAMin', c.advMin))}
       ${row('Eina kartu su EI į „valymo“ puolimus', chk('hcClr', c.clear))}
       ${row('Siunčiamas ginti kito puolamo kaimo (su gynėjais)', chk('hcDef', c.defHelp))}
+      ${row('1 % herojaus sveikatos vertė (kiek EI siųsti su herojumi į oazę)', `<input id="hcHpV" type="number" min="0" max="5000" value="${c.hpValue}" style="width:65px"> resursų`)}
       </table>
       <div style="margin-top:8px"><button id="abHeroS" style="padding:3px 10px;background:#7a4;color:#fff;border:0;border-radius:4px;cursor:pointer">Išsaugoti</button></div>`;
     document.body.appendChild(box);
     document.getElementById('abHeroX').onclick = () => box.remove();
     document.getElementById('abHeroS').onclick = () => {
       const v = id => Math.max(0, Math.min(100, parseInt(document.getElementById(id).value, 10) || 0));
-      const nc = { oasisMin: v('hcOMin'), oasisKeep: v('hcOKeep'), oasisMaxLoss: v('hcOLoss'), advMin: v('hcAMin'), adv: document.getElementById('hcAdv').checked, clear: document.getElementById('hcClr').checked, defHelp: document.getElementById('hcDef').checked };
+      const nc = { oasisMin: v('hcOMin'), oasisKeep: v('hcOKeep'), oasisMaxLoss: v('hcOLoss'), advMin: v('hcAMin'), adv: document.getElementById('hcAdv').checked, clear: document.getElementById('hcClr').checked, defHelp: document.getElementById('hcDef').checked, hpValue: Math.max(0, Math.min(5000, parseInt(document.getElementById('hcHpV').value, 10) || 0)) };
       jset('heroCfg', nc); GM_setValue('oasisMode', document.getElementById('hcOm').value); GM_setValue('oasisNext', 0);
       log('Karžygio nustatymai:', JSON.stringify(nc), 'oazės:', GM_getValue('oasisMode'));
       box.remove(); location.reload();
@@ -4644,8 +4648,11 @@
         const info = await tileAnimals(c.x, c.y);
         if (!info.free) { cache[c.x + '|' + c.y] = now + 12 * 3600000; continue; }    // užimta kito žaidėjo – nelieti
         if (info.total === 0) { const eo = jget('emptyOases', []).filter(o => !(o.x === c.x && o.y === c.y)); eo.push({ x: c.x, y: c.y }); jset('emptyOases', eo.slice(-15)); cache[c.x + '|' + c.y] = now + rand(60, 120) * 60000; log(`Oazė ${c.x}|${c.y}: tuščia – nieko neduotų, praleidžiu`); continue; }   // tuščia oazė nieko neduoda (patikrinta)
-        let def = 10, xp = 0;
-        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { def = Infinity; break; } def += a.n * Math.max(st.d[0], st.d[1]); xp += a.n * st.up; }
+        let def = 10, xp = 0, dI = 0, dC = 0;
+        for (const a of info.animals) { const st = ANIMALS[a.u]; if (!st) { def = Infinity; break; } def += a.n * Math.max(st.d[0], st.d[1]); dI += a.n * st.d[0]; dC += a.n * st.d[1]; xp += a.n * st.up; }
+        // Gynyba pagal puolėjų sudėtį (kaip žaidimas): pėstininkų puolimo dalis × gynyba nuo pėstininkų + raitelių dalis × gynyba nuo raitelių.
+        // Herojus su žirgu – raitelis (simuliatorius: herojus + 25 EI prieš 17 žiurkių, 11 vorų, 6 šernus → gynyba 988 = gynyba nuo raitelių)
+        const defFor = (ai, ac) => !isFinite(def) ? Infinity : (10 + (dI * ai + dC * ac) / Math.max(1, ai + ac)) * OASIS_SAFETY;
         // Narvų taikinys: oazėje TIK stiprūs gyvūnai – sugaunami be kovos
         const weakN = info.animals.filter(a => !CAGE_ANIMALS.includes(a.u)).reduce((p, a) => p + a.n, 0);
         if (cagesOn && avail > 0 && info.animals.length && weakN <= CAGE_WEAK_MAX) {
@@ -4669,17 +4676,21 @@
         // Nuostolio % taikomas kiekvienam kariui: žuvusių EI ≈ n × nuostolis. Perrenkami visi n – imamas DIDŽIAUSIAS n, kai nežūsta nė vienas
         // (daugiau grobio, mažiau žalos herojui); jei taip neišeina, o vienas herojus netinka – leidžiama žūti ne daugiau kaip OASIS_EI_MAX_DEATHS.
         const eiAvail = Math.min(GM_getValue('eiHome', 0) || 0, OASIS_EI_MAX);
-        const rawFor = n => predictLoss(def, attack + n * EI_ATTACK, true);
+        const hA = HERO_MOUNTED ? [0, attack] : [attack, 0];                 // herojaus puolimas: [pėstininkų, raitelių]
+        const dEI = n => defFor(hA[0], hA[1] + n * EI_ATTACK);                // herojus + n EI
+        const rawFor = n => predictLoss(dEI(n), attack + n * EI_ATTACK, true);
         // Savikalibracija mažina prognozę tik lengvose kovose (x < 0,5): ji skaičiuota iš lengvų kovų, sunkioms netinka (18:30 žuvo herojus)
-        const xFor = n => Math.pow(def / (attack + n * EI_ATTACK), 1.5);
+        const xFor = n => Math.pow(dEI(n) / (attack + n * EI_ATTACK), 1.5);
         const lossFor = n => Math.min(999, rawFor(n) * (xFor(n) >= 0.5 ? Math.max(1, calK()) : calK()));
         const deathsFor = n => Math.round(n * lossFor(n) / 100);
         // Kai gyvūnų gynyba (be atsargos) ≥ mūsų puolimo – plėšimą pralaimim: herojus netenka ~60 %+ sveikatos, EI žūsta – niekada nesiunčiam
-        const winsFor = n => def / OASIS_SAFETY < attack + n * EI_ATTACK;
+        const winsFor = n => dEI(n) / OASIS_SAFETY < attack + n * EI_ATTACK;
         const okFor = n => { const l = lossFor(n); return winsFor(n) && health >= hc().oasisMin && l <= hc().oasisMaxLoss && health - l >= hc().oasisKeep; };
-        let nEI = 0;
-        for (let n = eiAvail; n >= 1; n--) if (deathsFor(n) === 0 && okFor(n)) { nEI = n; break; }
-        if (!nEI && !okFor(0)) for (let n = eiAvail; n >= 1; n--) if (deathsFor(n) <= OASIS_EI_MAX_DEATHS && okFor(n)) { nEI = n; break; }
+        // Kiek EI siųsti: didžiausia NAUDA = premija už nukautus gyvūnus − žuvę EI − herojaus sveikata (1 % = hc().hpValue resursų).
+        // Herojaus sveikata – riboto greičio išteklius: geriau prarasti 1 EI ir saugoti herojų (pvz. 25 EI: −1 EI, herojui −3 %; 5 EI: 0 EI, herojui −9 %)
+        const valFor = n => OASIS_BONUS_PER_UP * xp / (1 + xFor(n)) - deathsFor(n) * UNIT_COST_R.t5 - lossFor(n) * hc().hpValue;
+        let nEI = 0, bestV = -Infinity;
+        for (let n = 0; n <= eiAvail; n++) if (okFor(n) && deathsFor(n) <= OASIS_EI_MAX_DEATHS) { const v = valFor(n); if (v > bestV) { bestV = v; nEI = n; } }
         let loss = lossFor(nEI);      // laisvą oazę žaidimas leidžia tik plėšti (patikrinta)
         let ok = okFor(nEI), army = null;
         // ARMIJA: herojus + visi EI + imperionai + legionieriai (artimoms oazėms) – mažesnis nuostolis kiekvienam, daugiau nukautų (XP, premija)
@@ -4688,21 +4699,23 @@
           const units = { t5: eiAvail, t3: c.dist * 60 / (7 * TROOP_SPEED) <= ARMY_MAX_MIN ? (ih.t3 || 0) : 0, t1: c.dist * 60 / (6 * TROOP_SPEED) <= ARMY_MAX_MIN ? (ih.t1 || 0) : 0 };   // lėti pėstininkai – tik iki ARMY_MAX_MIN kelio
           if (units.t3 + units.t1 > 0) {
             const att = attack + Object.entries(units).reduce((a2, [u, n]) => a2 + n * UNIT_ATT_R[u], 0);
-            const xA = Math.pow(def / att, 1.5);
-            const lossA = Math.min(999, predictLoss(def, att, true) * (xA >= 0.5 ? Math.max(1, calK()) : calK()));
+            const defA = defFor(hA[0] + units.t1 * UNIT_ATT_R.t1 + units.t3 * UNIT_ATT_R.t3, hA[1] + units.t5 * UNIT_ATT_R.t5);   // pėstininkų ir raitelių dalys
+            const xA = Math.pow(defA / att, 1.5);
+            const lossA = Math.min(999, predictLoss(defA, att, true) * (xA >= 0.5 ? Math.max(1, calK()) : calK()));
             const deaths = Object.fromEntries(Object.entries(units).map(([u, n]) => [u, Math.round(n * lossA / 100)]));
             const lostRes = Object.entries(deaths).reduce((a2, [u, d2]) => a2 + d2 * UNIT_COST_R[u], 0);
-            const xp0 = Math.pow((def / OASIS_SAFETY) / att, 1.5), killedA = 1 / (1 + xp0);
+            const xp0 = Math.pow((defA / OASIS_SAFETY) / att, 1.5), killedA = 1 / (1 + xp0);
             const bonus = OASIS_BONUS_PER_UP * xp * killedA, profit = bonus - lostRes;
-            const okA = def / OASIS_SAFETY < att && health >= hc().oasisMin && lossA <= hc().oasisMaxLoss && health - lossA >= hc().oasisKeep && profit >= 0;
+            const okA = defA / OASIS_SAFETY < att && health >= hc().oasisMin && lossA <= hc().oasisMaxLoss && health - lossA >= hc().oasisKeep && profit >= 0;
             log(`Oazė ${c.x}|${c.y}: ARMIJA (EI ${units.t5}, imperionų ${units.t3}, legionierių ${units.t1}) – herojui −${Math.round(lossA)} sv., žus ${JSON.stringify(deaths)} (${lostRes} res.), premija ~${Math.round(bonus)} → ${okA ? 'TINKA' : 'netinka'}`);
-            if (okA && (!ok || lossA < loss)) { army = { units, deaths, lostRes, bonus, raw: predictLoss(def, att, true) }; loss = lossA; ok = true; nEI = units.t5; }
+            const valA = bonus - lostRes - lossA * hc().hpValue;                 // ta pati nauda kaip EI variantui
+            if (okA && (!ok || valA > valFor(nEI))) { army = { units, deaths, lostRes, bonus, raw: predictLoss(defA, att, true) }; loss = lossA; ok = true; nEI = units.t5; }
           }
         }
-        const xr = Math.pow(def / attack, 1.5);
+        const xr = Math.pow(dEI(nEI) / (attack + nEI * EI_ATTACK), 1.5);
         const killed = 1 / (1 + xr);                                       // plėšime nukaunama dalis gyvūnų
         const score = xp * killed / (1 + c.dist / 8);                       // XP ir grobis ~ nukautų gyvūnų išlaikymui; tolimesnės – mažiau vertos
-        log(`Oazė ${c.x}|${c.y}: gyvūnų ${info.total}, gynyba ~${Math.round(def)}, ${nEI ? `+${nEI} EI (žus ~${deathsFor(nEI)}), ` : ''}prognozė −${loss > 100 ? '∞' : Math.round(loss)} sv. ${ok ? 'TINKA' : 'netinka'}`);
+        log(`Oazė ${c.x}|${c.y}: gyvūnų ${info.total}, gynyba ~${Math.round(dEI(nEI))}, ${nEI ? `+${nEI} EI (žus ~${deathsFor(nEI)}), ` : ''}prognozė −${loss > 100 ? '∞' : Math.round(loss)} sv. ${ok ? 'TINKA' : 'netinka'}`);
         if (!ok) { cache[c.x + '|' + c.y] = now + (loss > hc().oasisMaxLoss ? rand(25, 50) : rand(15, 30)) * 60000; continue; }
         if (xp < OASIS_MIN_XP) { log(`Oazė ${c.x}|${c.y}: per menka (vertė ${xp}) – praleidžiu`); cache[c.x + '|' + c.y] = now + rand(60, 120) * 60000; continue; }   // per stipri – ilgiau; tik sveikatos trūksta – trumpiau
         if (!best || score > best.score) best = { ...c, raid, loss, score, total: info.total, ei: nEI, eiDead: army ? army.deaths.t5 : nEI ? deathsFor(nEI) : 0, raw: army ? army.raw : rawFor(nEI), inf: army ? { t3: army.units.t3, t1: army.units.t1 } : null, army };
