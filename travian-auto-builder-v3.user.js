@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.51
+// @version      20.52
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -4084,21 +4084,67 @@
     return units.slice().sort((a, b) => spent[a[0]] - spent[b[0]])[0];
   }
   function trainCustom(tc) {
-    if (!GM_getValue('trainOn', true) || Date.now() < (vget('trainNext', 0) || 0)) return false;
+    if (!GM_getValue('trainOn', true)) return false;
+    if (Date.now() < (vget('trainNext', 0) || 0)) {                       // eilė į priekį – kai kurio pastato eilė baigiasi, nelaukti įprasto laiko
+      const ah = +tc.ahead || 0, qE = vget('qEnd', {}) || {};
+      const due = ah > 0 && Object.entries(tc.units || {}).some(([uu, m]) => m > 0 && UNITS_R[uu] && Date.now() > (vget('qChk', 0) || 0) && (qE[UNITS_R[uu].g] || 0) - Date.now() < ah * 60000 / 2);
+      if (!due) return false;
+    }
     const fcEl = document.getElementById('stockBarFreeCrop');
     const fc = fcEl ? parseInt(clean(fcEl.textContent).replace(/[^\d-]/g, ''), 10) : 0;
     const lv = vget('blv', {}) || {}, full = vget('trainFull', {}) || {};
     const units = Object.entries(tc.units || {}).filter(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && !(full[u] > Date.now()));
     if (!units.length) return false;
     const spent = vget('trainSpent', {}) || {};
-    const [u, target] = pickBalanced(units, spent);
+    // EILĖ Į PRIEKĮ: jei nustatyta (pvz. 30 min.) – pirmiau tas pastatas, kurio eilė trumpiausia ir trumpesnė už nustatytą
+    const ahead = +tc.ahead || 0, qEnd = vget('qEnd', {}) || {}, now = Date.now();
+    let pick = null;
+    if (ahead > 0) {
+      const short = units.filter(([uu]) => (qEnd[UNITS_R[uu].g] || 0) - now < ahead * 60000);
+      if (short.length) { const minG = Math.min(...short.map(([uu]) => qEnd[UNITS_R[uu].g] || 0)); pick = pickBalanced(short.filter(([uu]) => (qEnd[UNITS_R[uu].g] || 0) === minG), spent); }
+    }
+    const [u, target] = pick || pickBalanced(units, spent);
     if (!u) return false;
     vset('trainSpent', spent);
     const war = !GM_getValue('buildOn', true);                            // karo režimas – treniruoti dažnai ir beveik viskuo
     vset('trainNext', Date.now() + rand(...(war ? [4, 8] : CUSTOM_EVERY)) * 60000);
-    jset('trainPlan', { unit: u, label: UNITS_R[u].n, share: war ? 0.9 : CUSTOM_SHARE, max: war ? 300 : CUSTOM_MAX_BATCH, target });
+    jset('trainPlan', { unit: u, label: UNITS_R[u].n, share: war ? 0.9 : CUSTOM_SHARE, max: war ? 300 : CUSTOM_MAX_BATCH, target, ahead });
     startChore('train', '/build.php?gid=' + UNITS_R[u].g);
     return true;
+  }
+  // ---- KALVĖ: karių tobulinimas iki tavo nurodytų lygių (lange „Kariai“), žemiausias lygis – pirmiau ----
+  const SMITH_EVERY = [20, 40];
+  function smithChore() {
+    if (((vget('blv', {}) || {})[13] || 0) < 1) return false;
+    const want = trainCfgFor(DID).smith || {};
+    if (!Object.values(want).some(v => v > 0) || Date.now() < (vget('smithNext', 0) || 0)) return false;
+    const cur = vget('smithLv', null);
+    if (cur && !Object.entries(want).some(([u, l]) => l > (cur[u] || 0))) return false;      // viskas pasiekta (pagal paskutinį apsilankymą)
+    vset('smithNext', Date.now() + rand(...SMITH_EVERY) * 60000);
+    startChore('smith', '/build.php?gid=13');
+    return true;
+  }
+  async function onSmith() {
+    GM_setValue('chore', '');
+    await sleep(rand(2500, 5000));
+    const want = trainCfgFor(DID).smith || {}, cur = {};
+    const rows = [...document.querySelectorAll('.researches .research, .build_details .research')].map(r => {
+      const img = r.querySelector('img.unit'), um = img && String(img.className).match(/\bu(\d+)\b/);
+      const m = clean((r.querySelector('.level') || {}).textContent || '').match(/(\d+)(?:\s*\+\s*(\d+))?/);
+      const btn = [...r.querySelectorAll('button')].find(b => /green/.test(b.className) && !b.disabled && !/gold|disabled|exchange/.test(b.className));
+      return um ? { u: 't' + (((+um[1] - 1) % 10) + 1), lvl: m ? +m[1] + (+m[2] || 0) : 0, btn } : null;
+    }).filter(Boolean);
+    rows.forEach(x => { cur[x.u] = x.lvl; }); vset('smithLv', cur);
+    const maxL = parseInt((clean(document.body.innerText).match(/iki (\d+) lygio/i) || [])[1] || '0', 10);   // „Tobulinkite karius iki 7 lygio“ (kalvės lygis)
+    const cand = rows.filter(x => (want[x.u] || 0) > x.lvl && (!maxL || x.lvl < maxL)).sort((a, b) => a.lvl - b.lvl);
+    if (!cand.length) { setStatus('kalvė: nustatyti lygiai pasiekti' + (maxL ? ` (kalvė leidžia iki ${maxL})` : '')); return finishChore(); }
+    const c = cand.find(x => x.btn);
+    if (!c) { vset('smithNext', Date.now() + rand(10, 20) * 60000); setStatus(`kalvė: ${cand.map(x => `${(UNITS_R[x.u] || {}).n || x.u} ${x.lvl}→${want[x.u]}`).join(', ')} – dabar negalima (vyksta tobulinimas ar trūksta resursų)`); return finishChore(); }
+    log(`Kalvė: tobulinu ${(UNITS_R[c.u] || {}).n || c.u} ${c.lvl} → ${c.lvl + 1}`);
+    setStatus(`kalvė: ${(UNITS_R[c.u] || {}).n || c.u} → ${c.lvl + 1}`);
+    c.btn.click();
+    await sleep(rand(2000, 3500));
+    finishChore();
   }
   function showTrainPanel() {
     const old = document.getElementById('abTrain'); if (old) { old.remove(); return; }
@@ -4115,6 +4161,9 @@
         <div style="margin-bottom:6px">${[['auto', 'AUTO (skripto logika)'], ['off', 'IŠJUNGTA'], ['custom', 'PASIRINKTA']].map(([m, t]) => `<label style="margin-right:10px"><input type="radio" name="abTrM" value="${m}"${tc.mode === m ? ' checked' : ''}> ${t}</label>`).join('')}</div>
         <table id="abTrU" style="border-collapse:collapse;width:100%;${tc.mode === 'custom' ? '' : 'opacity:.4'}"><tr style="background:#dfeedd"><th style="text-align:left;padding:3px">Karys</th><th>Turi${cnt.ts ? ' (' + hhmm(cnt.ts) + ')' : ''}</th><th>Iki kiek (0 – negaminti)</th></tr>
         ${Object.entries(UNITS_R).map(([u, d]) => `<tr style="border-top:1px solid #cdc"><td style="padding:3px">${d.n}</td><td style="text-align:center">${cnt.c && cnt.c[u] != null ? cnt.c[u] : '–'}</td><td style="text-align:center"><input data-u="${u}" type="number" min="0" step="10" value="${(tc.units || {})[u] || 0}" style="width:70px"></td></tr>`).join('')}</table>
+        <div style="margin:8px 0 3px"><b>Kalvė</b> <span style="color:#555">– tobulinti karius iki lygio (0 – netobulinti; ne aukščiau už kalvės lygį)</span></div>
+        <table id="abTrK" style="border-collapse:collapse;width:100%"><tr style="background:#dfeedd"><th style="text-align:left;padding:3px">Karys</th><th>Dabar</th><th>Iki lygio</th></tr>
+        ${(() => { const sl = GM_getValue('smithLv@' + cur, null) || {}; return Object.entries(UNITS_R).map(([u, d]) => `<tr style="border-top:1px solid #cdc"><td style="padding:3px">${d.n}</td><td style="text-align:center">${sl[u] != null ? sl[u] : '–'}</td><td style="text-align:center"><input data-k="${u}" type="number" min="0" max="20" value="${(tc.smith || {})[u] || 0}" style="width:50px"></td></tr>`).join(''); })()}</table>
         ${(() => {
           const all = jget('troopCnts', {}), names = { ...Object.fromEntries(Object.entries(UNITS_R).map(([u, d]) => [u, d.n])), t9: 'Senatorius', t10: 'Kolonistas' };
           const cols = vil.filter(v => all[v.did]);
@@ -4126,6 +4175,7 @@
           ${rows.length ? rows.map(u => `<tr style="border-top:1px solid #cdc"><td style="padding:3px">${names[u]}</td>${cols.map(v => `<td style="text-align:center">${(all[v.did].c || {})[u] || 0}</td>`).join('')}<td style="text-align:center;font-weight:bold">${tot(u)}</td></tr>`).join('') : `<tr><td colspan="${cols.length + 2}" style="padding:3px;color:#555">karių nėra</td></tr>`}</table>`;
         })()}
         <div style="color:#555;margin:6px 0">„Turi“ – visi šio kaimo kariai (namie ir išėję), atnaujinama kai skriptas treniruoja. Vienu kartu – iki ${Math.round(CUSTOM_SHARE * 100)} % atsargų, tikrinama kas ${CUSTOM_EVERY[0]}–${CUSTOM_EVERY[1]} min. Grūdų balansas netikrinamas. Įsikūrėjai ir gelbėjimas nuo puolimo veikia visada.</div>
+        <div style="margin:6px 0">Eilė į priekį (PASIRINKTA): ne mažiau kaip <input id="abTrAh" type="number" min="0" max="600" value="${+tc.ahead || 0}" style="width:50px"> min. karių kiekviename pastate (0 – išjungta)</div>
         <button id="abTrS" style="border:0;background:#686;color:#fff;border-radius:4px;padding:4px 12px;cursor:pointer;font-weight:bold">Išsaugoti</button> <span id="abTrOk" style="color:#383"></span>`;
       box.querySelector('#abTrX').onclick = () => box.remove();
       box.querySelector('#abTrAll').onclick = () => { GM_setValue('trainOn', !GM_getValue('trainOn', true)); render(); };
@@ -4134,7 +4184,9 @@
       box.querySelector('#abTrS').onclick = () => {
         const mode = (box.querySelector('input[name=abTrM]:checked') || {}).value || 'auto';
         const units = {}; box.querySelectorAll('#abTrU input[data-u]').forEach(i => { const v = Math.max(0, parseInt(i.value, 10) || 0); if (v) units[i.dataset.u] = v; });
-        const all = jget('trainCfg', {}); all[cur] = { mode, units }; jset('trainCfg', all);
+        const ahead = Math.max(0, Math.min(600, parseInt((box.querySelector('#abTrAh') || {}).value, 10) || 0));
+        const smith = {}; box.querySelectorAll('#abTrK input[data-k]').forEach(i => { const v = Math.max(0, Math.min(20, parseInt(i.value, 10) || 0)); if (v) smith[i.dataset.k] = v; });
+        const all = jget('trainCfg', {}); all[cur] = { mode, units, ahead, smith }; jset('trainCfg', all); GM_setValue('smithNext@' + cur, 0);
         GM_setValue('trainNext@' + cur, 0); GM_setValue('trainFull@' + cur, {});
         box.querySelector('#abTrOk').textContent = 'išsaugota';
       };
@@ -4275,6 +4327,14 @@
       const nRes = Math.min(Math.floor(Math.min(...have.map((h, i) => Math.max(h * plan.share, Math.min(h, tr[i])) / cost[i]))), TRAIN_RES_MAX_BATCH);   // bent rezervas kariams
       n = Math.max(nShare, nRes);
     }
+    // EILĖ Į PRIEKĮ: kiek dabar treniruojama šiame pastate (sekundėmis) ir kiek trunka vienas karys
+    const qSec = Math.max(0, ...[...document.querySelectorAll('table.under_progress td.dur .timer, table.under_progress td.dur [value]')].map(e => +e.getAttribute('value') || 0));
+    const durEl = det.querySelector('.inlineIcon.duration .value'), unitSec = durEl ? clean(durEl.textContent).split(':').reduce((a, x) => a * 60 + (+x || 0), 0) : 0;
+    if (plan.ahead > 0 && unitSec > 0 && !plan.exact) {
+      const nFill = Math.ceil((plan.ahead * 60 - qSec) / unitSec);
+      if (nFill > n) { const nAll = Math.floor(Math.min(...have.map((h, i) => h / cost[i]))); n = Math.max(n, Math.min(nFill, nAll, 500)); }
+      log(`Eilė į priekį: dabar ${Math.round(qSec / 60)} min., reikia ${plan.ahead} min. (1 karys ${unitSec} s) → ${Math.max(0, nFill)} karių, gaminsiu ${n}`);
+    }
     // grūdų balanso nebetikrinam – jį tvarko turgus ir statybos (tavo sprendimas)
     if (plan.target) {                                                    // PASIRINKTA: iki nurodyto skaičiaus (namie + išėję + eilėje)
       const own = await ownedTroops();
@@ -4283,6 +4343,7 @@
       if (need <= 0) { const f = vget('trainFull', {}) || {}; f[plan.unit] = Date.now() + 30 * 60000; vset('trainFull', f); setStatus(`kariai: ${plan.label} jau ${have}/${plan.target}`); return finishChore(); }
       n = Math.min(n, need);
     }
+    { const qE = vget('qEnd', {}) || {}, g = (UNITS_R[plan.unit] || {}).g; if (g) { qE[g] = Date.now() + (qSec + Math.max(0, n) * unitSec) * 1000; vset('qEnd', qE); } vset('qChk', Date.now() + 5 * 60000); }   // kada šio pastato eilė baigsis
     if (n < 1) { setStatus('kariai: per mažai pertekliaus – palauksiu'); return finishChore(); }
     setV(inp, String(n));
     await sleep(rand(800, 2000));
@@ -4372,7 +4433,7 @@
       ['eiIdle', () => FARM_LIST_MODE && eiIdleOasisChore()],
       ['legArmy', () => legArmyChore()],                                  // legionierių armija į oazes su gyvūnais              // laisvi EI (kol nėra žaidėjų fermų) – tolimesnės oazės
       ['supply', () => supplyChore()], ['auc', () => aucChore()], ['demo', () => demolishChore()], ['trade', () => tradeChore()],
-      ['bal', () => balanceChore()], ['train', () => trainChore()], ['farm', () => farmChore()], ['site', () => siteChore()],
+      ['bal', () => balanceChore()], ['train', () => trainChore()], ['smith', () => smithChore()], ['farm', () => farmChore()], ['site', () => siteChore()],
       ['oasis', () => oasisTurn() && oasisChore()],
     ];
     { const st = (GM_getValue('rrNext', 0) || 0) % RR.length;
@@ -5404,6 +5465,7 @@
   else if (path.includes('build') && chorePending('celebrate')) onCelebrate();
   else if (path.includes('build') && (chorePending('raidSend') || chorePending('raidConfirm') || chorePending('raidDone'))) onRaidSend();
   else if (path.includes('build') && chorePending('research')) onResearch();
+  else if (path.includes('build') && chorePending('smith')) onSmith();
   else if (path.includes('build') && chorePending('npc')) onNpc();
   else if (path.includes('build') && chorePending('offer')) onOffer();
   else if (path.includes('build') && chorePending('supply')) onSupply();
