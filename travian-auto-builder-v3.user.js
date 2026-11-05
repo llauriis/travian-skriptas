@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.39
+// @version      20.40
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -2418,18 +2418,20 @@
   const AUC_WILD_MIN_SALES = 3;      // radiniai: daikto pardavimų per paskutines 24 val. ≥ tiek (kad vidutinė kaina ką nors reikštų)
   const AUC_Q = 'query($after:String$first:Int!$sortBy:AuctionsSortBy$sortOrder:SortOrder$filter:AuctionFilter){bootstrapData{timestamp}ownPlayer{wallet{silverAmount}auctions{buy(after:$after first:$first sortBy:$sortBy sortOrder:$sortOrder filter:$filter){edges{node{amount bidsAmount finishedAt highestBidder{id name relation}identifier maxBid price item{typeId name rarity}}}}}}}';
   const aucCfg = () => {
-    const named = [], wild = { frac: 0, absMax: 300, minAvg: 800 };
+    const named = [], wild = { frac: 0, absMax: 300, minAvg: 800 }; let lowPct = AUC_LOW_PCT;
     String(GM_getValue('aucList', AUC_DEFAULT)).split(/\n/).forEach(l => {
       const m = l.match(/^\s*(.+?)\s*[=:]\s*(\d+)\s*%?\s*$/); if (!m) return;
       const nm = m[1].trim().toLowerCase().replace(/\s+/g, ' '), v = +m[2];
       if (nm === '*') wild.frac = v / 100;
+      else if (/^\*\s*(low|maž)/.test(nm)) lowPct = v;                     // „*low = 5%“ – mažiausia pardavimo kaina + tiek %; 0 – išjungta
       else if (/^\*\s*max/.test(nm)) wild.absMax = v;
       else if (/^\*\s*min/.test(nm)) wild.minAvg = v;
       else named.push({ name: nm, limit: v });
     });
-    return { named, wild: wild.frac > 0 ? wild : null };
+    return { named, wild: wild.frac > 0 ? wild : null, lowPct };
   };
   const aucParse = () => aucCfg().named;
+  const AUC_LOW_PCT = 5;             // bet kuris daiktas: statoma iki jo MAŽIAUSIOS pardavimo kainos (per 24 val.) + tiek % (vienam vienetui)
   const aucId = (name, map) => { const d = String(name).match(/^#?(\d+)$/); return d ? +d[1] : (AUC_KNOWN[name] || map[name] || null); };
   const aucLog = msg => { const l = jget('aucLog', []); l.push(hhmm(Date.now()) + ' ' + msg); jset('aucLog', l.slice(-25)); GM_setValue('aucNote', hhmm(Date.now()) + ' ' + msg); log('Aukcionas:', msg); };
   const aucSpent = () => { const d = jget('aucDay', null); return d && d.day === new Date().toDateString() ? d.sum : 0; };
@@ -2462,10 +2464,12 @@
     const t = (n.item || {}).typeId, map = jget('aucMap', {});
     const w = cfg.named.find(x => aucId(x.name, map) === t);
     if (w) return w.limit;
-    if (!cfg.wild) return 0;
+    if (!cfg.wild && !(cfg.lowPct > 0)) return 0;
     const a = await aucAvg(t, (n.item || {}).rarity, budget);
-    if (!a || !a.avg || a.avg < cfg.wild.minAvg || a.sales < AUC_WILD_MIN_SALES) return 0;
-    return Math.min(cfg.wild.frac * a.avg, cfg.wild.absMax);
+    if (!a || !a.avg || a.sales < AUC_WILD_MIN_SALES) return 0;
+    const capWild = cfg.wild && a.avg >= cfg.wild.minAvg ? Math.min(cfg.wild.frac * a.avg, cfg.wild.absMax) : 0;
+    const capLow = cfg.lowPct > 0 && a.low > 0 ? Math.floor(a.low * (1 + cfg.lowPct / 100)) : 0;   // mažiausia rinkos kaina + 5 %
+    return Math.max(capWild, capLow);
   }
   function aucChore() {
     const mode = GM_getValue('aucMode', 'test'); if (mode === 'off') return false;
@@ -2584,6 +2588,7 @@
     const lg = jget('aucLog', []).slice(-10).reverse().map(x => `<div>${x}</div>`).join('') || 'dar nieko';
     box.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:6px"><b>Aukcionas (sidabras)</b><button id="abAucX" style="border:0;background:#357;color:#fff;border-radius:4px;cursor:pointer">✕</button></div>
       <div style="color:#555;margin-bottom:4px">Po eilutę: <b>daikto pavadinimas = didžiausia kaina vienam vienetui</b> (pvz. „Gydomasis tepalas = 30“).<br>
+      <b>*low = 5%</b> – bet kuris daiktas iki jo <b>mažiausios pardavimo kainos</b> (per 24 val.) + 5 % (0 – išjungta; numatyta 5 %).<br>
       <b>* = 15%</b> – radiniai: bet kuris daiktas, kurio vieneto kaina ≤ 15 % jo vidutinės pardavimo kainos; <b>*max = 200</b> – radinio kaina vienetui ne didesnė; <b>*min = 800</b> – tik daiktai, kurių vidutinė kaina ≥ tiek. Jei „*“ eilutės nėra – radinių nepirks.</div>
       <textarea id="abAucT" rows="7" style="width:100%;box-sizing:border-box;font:12px monospace">${GM_getValue('aucList', AUC_DEFAULT)}</textarea>
       <div style="margin:6px 0"><button id="abAucS" style="padding:3px 10px;background:#357;color:#fff;border:0;border-radius:4px;cursor:pointer">Išsaugoti</button>
