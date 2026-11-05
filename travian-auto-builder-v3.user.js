@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.50
+// @version      20.51
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1663,7 +1663,8 @@
     for (const k of Object.keys(raids)) {
       if (JSON.stringify(raids[k]) === orig[k]) continue;                   // šis skaitymas nekeitė
       const m = { ...(fresh[k] || {}), ...raids[k] };
-      for (const f of ['last', 'scouted', 'block', 'deadUntil', 'lastSent']) { const a = (fresh[k] || {})[f] || 0, b = raids[k][f] || 0; if (a || b) m[f] = Math.max(a, b); }
+      const lifted = (raids[k].liftTs || 0) > ((fresh[k] || {}).liftTs || 0);   // šis skaitymas sąmoningai panaikino draudimą – jo neperrašyti didesniu
+      for (const f of ['last', 'scouted', 'block', 'deadUntil', 'lastSent']) { if (lifted && (f === 'block' || f === 'deadUntil')) continue; const a = (fresh[k] || {})[f] || 0, b = raids[k][f] || 0; if (a || b) m[f] = Math.max(a, b); }
       fresh[k] = m;
     }
     jset('raids', fresh);
@@ -3222,12 +3223,12 @@
       const v = vget('xy', null);
       let details = 0, added = 0, intel = 0;
       // Sąraše (patikrinta): „Žaidėjas užpuolė reidu / atakavo / ištyrė Taikinys – laikas“. „Gamta“ – oazės, „Natars“ – natarai: praleidžiam
-      for (let pg = 1; pg <= ALLY_REP_PAGES && details < 8; pg++) {
+      for (let pg = 1; pg <= ALLY_REP_PAGES && details < 15; pg++) {
         const d = new DOMParser().parseFromString(await (await fetch('/alliance/reports?page=' + pg, { credentials: 'same-origin' })).text(), 'text/html');
         const rows = [...d.querySelectorAll('table tbody tr')];
         if (!rows.length) break;
         for (const r of rows) {
-          if (details >= 8) break;
+          if (details >= 15) break;
           const a = [...r.querySelectorAll('a')].map(x => x.getAttribute('href') || '').find(isRepHref);
           if (!a) continue;
           const txt = clean(r.textContent).replace(/\s+/g, ' ').trim();
@@ -3251,7 +3252,13 @@
           raids[k] = st;
           // aljansiečiai iš ten neša grobį be (didelių) nuostolių → fermos kandidatas
           const f = Object.values(farms).find(x => x.x === tx && x.y === ty);
-          if (f && pr && pr.loot > 0 && (!pr.lost || pr.loot >= RAID_PROFIT_RATIO * pr.lost) && !isMyAlly(f)) { f.allyFarm = Date.now(); added++; }
+          if (f && pr && pr.loot > 0 && (!pr.lost || pr.loot >= RAID_PROFIT_RATIO * pr.lost) && !isMyAlly(f)) {
+            f.allyFarm = Date.now(); added++;
+            if (st.scoutDead) {                                               // mūsų žvalgas ten žuvo, bet aljansiečiai sėkmingai plėšia – vėl taikinys
+              st.scoutDead = false; if (st.block === st.deadUntil) st.block = 0; st.deadUntil = 0; st.bad = 0; st.liftTs = Date.now();
+              log(`Aljanso ataskaita: ${k} – aljansiečiai plėšia sėkmingai (grobis ${pr.loot}, nuostolis ${pr.lost || 0}) – žvalgo žūties draudimas panaikintas`);
+            }
+          }
           log(`Aljanso ataskaita: ${k} – gynėjų ${dd ? dd.units : '?'}, grobis ${pr ? pr.loot : '?'}${f ? '' : ' (kaimas dar ne mūsų sąraše)'}`);
           await sleep(rand(400, 1000));
         }
