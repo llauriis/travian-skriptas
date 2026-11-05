@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.47
+// @version      20.48
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -3068,6 +3068,13 @@
     setStatus(`išsiųsta į ${p.x}|${p.y}: ${send.join(' / ')}`);
     finishChore();
   }
+  // Langelio savininkas ir aljansas iš žemėlapio langelio informacijos („Aljansas:“, „Priklauso:“)
+  async function tileOwner(x, y) {
+    const j = await api('/api/v1/map/tile-details', { x, y });
+    const d = document.createElement('div'); d.innerHTML = (j && j.html) || '';
+    const al = d.querySelector('a[href*="/alliance/"]'), pl = d.querySelector('a[href*="/profile/"]');
+    return { ally: clean((al || {}).textContent || '').trim(), player: clean((pl || {}).textContent || '').trim() };
+  }
   // Žemėlapio langelio ataskaitų istorija: mūsų žvalgas/kariai žuvo per 24 val.? → { ts } arba null
   async function recentDeath(x, y) {
     const j = await api('/api/v1/map/tile-details', { x, y });
@@ -3095,6 +3102,17 @@
     const t = jget('raidTarget', null);
     // Paskutinė apsauga prieš siunčiant į ŽAIDĖJO kaimą: žemėlapio langelio ataskaitų istorija. Jei ten mūsų žvalgas žuvo (≤ 24 val.) – nesiunčiam
     if (t && !t.reinf && !/išvedimas/.test(t.name || '') && !/oaz/i.test(t.player || '')) {
+      // Paskutinė apsauga: DABARTINIS kaimo savininkas ir aljansas (žemėlapio duomenys gali būti pasenę – kaimas užkariautas, žaidėjas perėjo į kitą aljansą)
+      try {
+        const own = await tileOwner(t.x, t.y);
+        if (own && isMyAlly({ ally: own.ally })) {
+          const farms = jget('farms', {}); for (const fk of Object.keys(farms)) if (farms[fk].x === t.x && farms[fk].y === t.y) { farms[fk].ally = own.ally; if (own.player) farms[fk].player = own.player; }
+          jset('farms', farms);
+          log(`Siuntimas atšauktas: ${t.x}|${t.y} („${t.name || ''}“) dabar priklauso ${own.player || '?'} [${own.ally}] – draugai / „nepulti“ sąrašas`);
+          setStatus(`atšaukta: ${t.x}|${t.y} – [${own.ally}] nepuolam`);
+          return finishChore();
+        }
+      } catch (e) {}
       try {
         const dead = await recentDeath(t.x, t.y);
         if (dead) {
