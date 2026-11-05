@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.28
+// @version      20.29
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -3975,18 +3975,18 @@
     if (celebrationChore()) return true;
     if (researchChore()) return true;
     if (vlChore()) return true;                     // Aukso klubo sąrašas „Kaimai“ – saugūs taikiniai vienu paspaudimu
-    if (raidChore()) return true;
-    if (FARM_LIST_MODE ? farmListChore() : emptyOasisChore()) return true;
-    if (FARM_LIST_MODE && eiIdleOasisChore()) return true;              // laisvi EI (kol nėra žaidėjų fermų) – tolimesnės oazės
-    if (supplyChore()) return true;
-    if (aucChore()) return true;
-    if (demolishChore()) return true;
-    if (tradeChore()) return true;
-    if (balanceChore()) return true;
-    if (trainChore()) return true;
-    if (farmChore()) return true;
-    if (siteChore()) return true;
-    if (oasisTurn() && oasisChore()) return true;
+    // Ratu (round-robin): po kiekvieno atlikto darbo kitą kartą pirmenybė – KITAM. Anksčiau žvalgai (raidChore kas 1–3 min.)
+    // visada laimėdavo, ir legionierių sąrašas, kariai, turgus, oazės nesulaukdavo eilės (316 legionierių stovėjo namie).
+    const RR = [
+      ['raid', () => raidChore()],
+      ['fl', () => FARM_LIST_MODE ? farmListChore() : emptyOasisChore()],
+      ['eiIdle', () => FARM_LIST_MODE && eiIdleOasisChore()],              // laisvi EI (kol nėra žaidėjų fermų) – tolimesnės oazės
+      ['supply', () => supplyChore()], ['auc', () => aucChore()], ['demo', () => demolishChore()], ['trade', () => tradeChore()],
+      ['bal', () => balanceChore()], ['train', () => trainChore()], ['farm', () => farmChore()], ['site', () => siteChore()],
+      ['oasis', () => oasisTurn() && oasisChore()],
+    ];
+    { const st = (GM_getValue('rrNext', 0) || 0) % RR.length;
+      for (let i = 0; i < RR.length; i++) { const j = (st + i) % RR.length; if (RR[j][1]()) { GM_setValue('rrNext', j + 1); return true; } } }
     if (advAdsChore()) return true;                   // herojus nuotykyje – iš anksto reklamos kitam nuotykiui
     // Yra nuotykis (ženkliukas) – patikrinti anksčiau nei pagal įprastą grafiką
     if (hc().adv && advAllowed() && attackInMin() >= HOLD_HERO_ADV_MIN && !heroHold() && advBadge() && Date.now() >= (GM_getValue('advBadgeNext', 0) || 0)) {
