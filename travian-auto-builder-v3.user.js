@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.55
+// @version      20.56
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -2714,11 +2714,32 @@
     } catch (e) { log('Aukciono klaida', e); }
     finishChore();
   }
+  // STATYMŲ ISTORIJA: mūsų didžiausias statymas, galutinė kaina, kas laimėjo, palyginimas su mažiausia ir vidutine rinkos kaina (už vienetą)
+  async function aucHistory(el) {
+    try {
+      const q = 'query($after:String$first:Int!$sortBy:AuctionsBidsSortBy$sortOrder:SortOrder$filter:BidsAuctionsFilter){bootstrapData{timestamp}ownPlayer{auctions{bids{auctions(after:$after first:$first sortBy:$sortBy sortOrder:$sortOrder filter:$filter){edges{node{amount finishedAt highestBidder{name relation}maxBid price item{typeId name rarity}}}}}}}}';
+      const j = await api('/api/v1/graphql', { query: q, variables: { sortBy: 'FINISHED_AT', sortOrder: 'DESC', filter: {}, after: null, first: 40 } });
+      const ts = j.data.bootstrapData.timestamp, L = j.data.ownPlayer.auctions.bids.auctions.edges.map(e => e.node);
+      const cache = {}, budget = { n: 25 };
+      for (const n of L) { const k = n.item.typeId + ':' + n.item.rarity; if (!(k in cache)) cache[k] = await aucAvg(n.item.typeId, n.item.rarity, budget); }
+      let won = 0, wonSpent = 0, lost = 0;
+      const rows = L.map(n => {
+        const a = cache[n.item.typeId + ':' + n.item.rarity] || {}, per = x => n.amount ? Math.round(x / n.amount * 10) / 10 : x;
+        const done = n.finishedAt < ts, me = (n.highestBidder || {}).relation === 'self';
+        if (done && me) { won++; wonSpent += n.price; } else if (done) lost++;
+        const res = !done ? (me ? '<b style="color:#383">pirmaujam</b>' : 'vyksta') : me ? '<b style="color:#383">LAIMĖTA</b>' : `pralaimėta (${(n.highestBidder || {}).name || '?'})`;
+        const dt = new Date(n.finishedAt * 1000), tday = new Date().toDateString() === dt.toDateString();
+        return `<tr style="border-top:1px solid #eee"><td>${tday ? '' : (dt.getMonth() + 1) + '-' + dt.getDate() + ' '}${hhmm(n.finishedAt * 1000)}</td><td>${n.item.name} ×${n.amount}</td><td style="text-align:right">${n.maxBid} <span style="color:#777">(${per(n.maxBid)})</span></td><td style="text-align:right">${n.price} <span style="color:#777">(${per(n.price)})</span></td><td style="text-align:right">${a.low ? `${a.low} / ${Math.floor(a.low * 1.05)}` : '–'}</td><td style="text-align:right">${a.avg || '–'}</td><td>${res}</td></tr>`;
+      }).join('');
+      el.innerHTML = `<div style="margin-bottom:3px">Baigtų: ${won + lost}, laimėta ${won} (išleista ${wonSpent} sid.), pralaimėta ${lost}. Skliaustuose – už vienetą.</div>
+        <table style="border-collapse:collapse;width:100%"><tr style="background:#e4ecf4"><th>Pabaiga</th><th>Daiktas</th><th>Mūsų max</th><th>Galutinė kaina</th><th>Mažiausia rinkos / +5 %</th><th>Vidutinė</th><th>Rezultatas</th></tr>${rows || '<tr><td colspan="7">statymų nėra</td></tr>'}</table>`;
+    } catch (e) { el.textContent = 'nepavyko gauti istorijos: ' + e.message; }
+  }
   function showAuction() {
     const old = document.getElementById('abAuc'); if (old) { old.remove(); return; }
     const box = document.createElement('div');
     box.id = 'abAuc';
-    box.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:100000;background:#fffaf0;color:#222;border:2px solid #357;border-radius:8px;padding:10px;max-height:80vh;overflow:auto;font:12px sans-serif;width:430px';
+    box.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:100000;background:#fffaf0;color:#222;border:2px solid #357;border-radius:8px;padding:10px;max-height:80vh;overflow:auto;font:12px sans-serif;width:min(760px,95vw)';
     const lg = jget('aucLog', []).slice(-10).reverse().map(x => `<div>${x}</div>`).join('') || 'dar nieko';
     box.innerHTML = `<div style="display:flex;justify-content:space-between;margin-bottom:6px"><b>Aukcionas (sidabras)</b><button id="abAucX" style="border:0;background:#357;color:#fff;border-radius:4px;cursor:pointer">✕</button></div>
       <div style="color:#555;margin-bottom:4px">Po eilutę: <b>daikto pavadinimas = didžiausia kaina vienam vienetui</b> (pvz. „Gydomasis tepalas = 30“).<br>
@@ -2728,9 +2749,11 @@
       <div style="margin:6px 0"><button id="abAucS" style="padding:3px 10px;background:#357;color:#fff;border:0;border-radius:4px;cursor:pointer">Išsaugoti</button>
       <span style="margin-left:8px;color:#555">sidabro: ${GM_getValue('aucSilver', '?')} · šiandien statyta: ${aucSpent()} / ${AUC_DAILY_MAX}</span></div>
       <div style="color:#555;margin-bottom:4px">Paskutinis patikrinimas: ${(() => { const l = jget('aucLast', null); return l ? `${hhmm(l.ts)} – aukcionų ${l.n}, baigiasi per ${AUC_HORIZON_S} s: ${l.soon}${l.hit ? ', tinka: ' + l.hit : ', tinkamų nėra'}` : 'dar nebuvo'; })()}</div>
-      <div style="color:#555">Paskutiniai veiksmai:</div><div style="font-size:11px">${lg}</div>`;
+      <div style="color:#555">Paskutiniai veiksmai:</div><div style="font-size:11px">${lg}</div>
+      <div style="font-weight:bold;margin:10px 0 3px;border-top:1px solid #dde;padding-top:6px">Statymų istorija (žaidimo duomenys)</div><div id="abAucH" style="font-size:11px">kraunama…</div>`;
     document.body.appendChild(box);
     document.getElementById('abAucX').onclick = () => box.remove();
+    aucHistory(box.querySelector('#abAucH'));
     document.getElementById('abAucS').onclick = () => { GM_setValue('aucList', document.getElementById('abAucT').value); GM_setValue('aucNext', 0); box.remove(); };
   }
 
