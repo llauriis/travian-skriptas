@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.62
+// @version      20.63
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -12,9 +12,11 @@
 // @match        *://*.travian.com/report*
 // @match        *://*.travian.com/karte.php*
 // @match        *://*.travian.com/auctions/*
+// @match        *://*.travian.com/alliance/*
 // @match        *://lobby.legends.travian.com/*
 // @updateURL    https://raw.githubusercontent.com/llauriis/travian-skriptas/main/travian-auto-builder-v3.user.js
 // @downloadURL  https://raw.githubusercontent.com/llauriis/travian-skriptas/main/travian-auto-builder-v3.user.js
+// @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_listValues
@@ -1222,6 +1224,103 @@
   };
   const finishChore = () => { GM_setValue('chore', ''); later(rand(3, 8), () => (location.href = '/dorf1.php')); };
 
+  // ===== PUSLAPIAI SKAITOMI TIK JUOS ATIDARANT – KAIP ŽMOGUS =====
+  // Joks žaidimo puslapis nebeskaitomas fone (fetch). Kai kuriai funkcijai reikia puslapio (ataskaitų, susibūrimo vietos, aljanso, centro…),
+  // jis įrašomas į „lankytinų“ eilę; skriptas jį tikrai ATIDARO naršyklėje, kelias sekundes „paskaito“, išsaugo turinį ir eina toliau.
+  // Funkcijos naudoja išsaugotą kopiją (navDoc), jei ji pakankamai šviežia; jei ne – kitą kartą (kai puslapis bus aplankytas).
+  const NAV_KEEP = 45, NAV_WANT_MAX = 12, VISIT_RUN_MAX = 6;
+  const VILL_PAGE = p => /^\/(dorf\d|build\.php)/.test(p);
+  function navKey(u, did) {
+    const x = new URL(u, location.origin), p = new URLSearchParams(x.search); p.delete('newdid');
+    if (x.pathname === '/build.php' && p.get('id') === '39' && !p.get('gid')) { p.delete('id'); p.set('gid', '16'); }   // susibūrimo vieta = vieta 39
+    if (x.pathname === '/build.php' && p.get('gid') === '16' && !p.get('tt')) p.set('tt', '1');                       // be skirtuko – „Apžvalga“
+    const q = [...p.entries()].map(e => e[0] + '=' + e[1]).sort().join('&');
+    return (VILL_PAGE(x.pathname) ? String(did || DID) + '@' : '') + x.pathname + (q ? '?' + q : '');
+  }
+  const navIdx = () => jget('navIdx', {}) || {};
+  function navGet(u, maxMin) {
+    const k = navKey(u), t = navIdx()[k];
+    if (!t || Date.now() - t > maxMin * 60000) return null;
+    return jget('navP:' + k, null);
+  }
+  function navDoc(u, maxMin, want = true) {
+    const e = navGet(u, maxMin);
+    if (e && e.html !== undefined) return new DOMParser().parseFromString(e.html || '', 'text/html');   // tuščia – atidaryta, bet nieko nebuvo (nekartojam)
+    if (want) navWant(u);
+    return null;
+  }
+  function navWant(u, prio = 0) {
+    const k = navKey(u), q = (jget('navWant', []) || []).filter(w => Date.now() - w.ts < 3 * 3600000);
+    const ex = q.find(w => w.k === k);
+    if (ex) { if (prio > (ex.prio || 0)) { ex.prio = prio; jset('navWant', q); } return; }
+    if (q.length >= NAV_WANT_MAX && prio <= 0) return;                    // per daug laukiančių – įrašys kitą kartą
+    q.push({ k, u, did: VILL_PAGE(new URL(u, location.origin).pathname) ? String(DID) : '', ts: Date.now(), prio });
+    jset('navWant', q);
+  }
+  const navPending = u => (jget('navWant', []) || []).some(w => w.k === navKey(u));
+  function navSave(k, data) {
+    const idx = navIdx(); idx[k] = Date.now();
+    jset('navP:' + k, { ts: idx[k], ...data });
+    const old = Object.keys(idx).sort((a, b) => idx[b] - idx[a]).slice(NAV_KEEP);
+    for (const x of old) { delete idx[x]; try { GM_deleteValue('navP:' + x); } catch (e) {} }
+    jset('navIdx', idx);
+    jset('navWant', (jget('navWant', []) || []).filter(w => w.k !== k));
+  }
+  // Centro (dorf2) pastatai saugomi kaip sąrašas; statomų pastatų skaičius – kad dorf1 eilei pasikeitus centras būtų atidarytas iš naujo
+  const FIELD_NAMES = /Medžio kirtavietė|Molio karjeras|Geležies kasykla|Grūdų laukas|Woodcutter|Clay Pit|Iron Mine|Cropland/i;
+  const qBuildCount = () => [...document.querySelectorAll('.buildingList ul li')].filter(li => !FIELD_NAMES.test(clean((li.querySelector('.name') || li).textContent).replace(/\s+/g, ' '))).length;
+  function navPageData() {
+    if (/^\/dorf2\.php/.test(location.pathname)) {
+      const builds = readBuildings(document);
+      return builds.length ? { builds, uc: builds.filter(b => b.uc).length } : null;
+    }
+    const c = document.getElementById('content') || document.getElementById('villageContent');
+    return c ? { html: c.outerHTML } : null;
+  }
+  // Atidarius bet kurį puslapį: jei jo laukiama arba tai centras / susibūrimo vieta – išsaugoti (žmogus juos ir taip dažnai mato)
+  function navCapture() {
+    try {
+      const k = navKey(location.pathname + location.search);
+      const want = (jget('navWant', []) || []).some(w => w.k === k);
+      const auto = /^\/dorf2\.php/.test(location.pathname) || /@\/build\.php\?gid=16&tt=1$/.test(k);
+      if (!want && !auto) return;
+      const d = navPageData(); if (d) navSave(k, d);
+    } catch (e) { log('Puslapio išsaugojimo klaida:', e && e.message); }
+  }
+  function visitGo(w) {
+    jset('visitTarget', { k: w.k, u: w.u });
+    startChore('visit', w.u);
+  }
+  function visitNext() {
+    const q = (jget('navWant', []) || []).filter(w => Date.now() - w.ts < 3 * 3600000 && (!w.did || w.did === String(DID)));
+    return q.sort((a, b) => (b.prio || 0) - (a.prio || 0) || a.ts - b.ts)[0] || null;
+  }
+  // Iš karto atidaryti reikalingą puslapį (pvz. centrą prieš statant, susibūrimo vietą artėjant puolimui)
+  function navGo(u, prio = 9) { navWant(u, prio); visitGo({ k: navKey(u), u }); }
+  // Darbų cikle: aplankyti laukiančius puslapius – po kelis iš eilės (kaip žmogus, skaitantis ataskaitas), paskui duoti eilę kitiems darbams
+  function visitChore() {
+    const w = visitNext();
+    if (!w) { GM_setValue('visitRun', 0); return false; }
+    if ((GM_getValue('visitRun', 0) || 0) >= VISIT_RUN_MAX) { GM_setValue('visitRun', 0); return false; }
+    visitGo(w);
+    return true;
+  }
+  async function onVisit() {
+    GM_setValue('chore', '');
+    const t = jget('visitTarget', null), kHere = navKey(location.pathname + location.search);
+    if (t && t.k !== kHere) {                                              // nukreipė kitur (pvz. ataskaita ištrinta) – išsaugom kaip yra, kad nekartotų
+      const d = navPageData(); navSave(t.k, d || { html: '' });
+    }
+    if (t && !navIdx()[t.k]) navSave(t.k, { html: '' });                  // nepavyko perskaityti – nebandyti be galo
+    await sleep(rand(1500, 4500));                                        // „skaito“
+    try { window.scrollBy(0, rand(80, 400)); } catch (e) {}
+    await sleep(rand(800, 2500));
+    GM_setValue('visitRun', (GM_getValue('visitRun', 0) || 0) + 1);
+    const n = visitNext();
+    if (n && (GM_getValue('visitRun', 0) || 0) < VISIT_RUN_MAX) return visitGo(n);
+    return finishChore();
+  }
+
   // Grąžina true, jei nukreipė į kitą puslapį (nuotykiai, užduotys, kuprinė)
   // Puslapio ženklai: žvaigždutė ant herojaus (naujas lygis) ir žalias skaičius ant nuotykių mygtuko
   const heroStar = () => { const e = document.querySelector('i.levelUp'); return !!(e && e.offsetParent && /show/.test(e.className)); };
@@ -1577,14 +1676,15 @@
   const isRepHref = x => /^\?id=|\/report\?id=|[?&]id=\d+(%7C|\|)/i.test(x || '') && !/build\.php/.test(x || '');
   // Ataskaitos puslapis – parsiunčiamas vieną kartą (gynėjai, resursai, grobis, koordinatės skaitomi iš to paties)
   let repCache = new Map();
-  async function repDoc(href) {
-    const u = href.startsWith('?') ? '/report' + href : href;
+  const repUrl = href => (href.startsWith('?') ? '/report' + href : href);
+  async function repDoc(href, want = true) {                               // ataskaita – tik jei jau ATIDARYTA (navDoc); kitaip įrašoma į lankytinų eilę
+    const u = repUrl(href);
     if (repCache.has(u)) return repCache.get(u);
-    let d = null;
-    try { d = new DOMParser().parseFromString(await (await fetch(u, { credentials: 'same-origin' })).text(), 'text/html'); } catch (e) {}
-    repCache.set(u, d);
+    const d = navDoc(u, 7 * 24 * 60, want);
+    if (d) repCache.set(u, d);
     return d;
   }
+  const repWaiting = href => !navGet(repUrl(href), 7 * 24 * 60) && navPending(repUrl(href));   // dar neatidaryta, bet laukia eilėje – nežymėti „perskaityta“
   // Savų kaimų koordinatės (iš šoninio sąrašo)
   const ownXYs = () => [...document.querySelectorAll('#sidebarBoxVillageList .listEntry.village')].map(e => {
     const m = clean((e.querySelector('.coordinatesGrid, .coordinates') || {}).textContent || '').replace(/\u2212/g, '-').match(/(-?\d+)\s*\|\s*(-?\d+)/);
@@ -1699,6 +1799,7 @@
       if (details >= REP_DETAIL_MAX) break;                               // nepažymim „matyta“ – perskaitysim kitą kartą
       details++;
       const rc = await reportCoords(a);
+      if (!rc && (repWaiting(a) || !navGet(repUrl(a), 7 * 24 * 60))) continue;   // ataskaita dar neatidaryta – kitą kartą
       if (!rc) { log('Ataskaita: koordinačių nerasta –', key); seen.push(key); continue; }
       seen.push(key);
       if (!rc.mine || rc.defOwn) continue;                                // ne mūsų puolimas (mus puola) arba savas kaimas
@@ -1845,12 +1946,12 @@
     if (f.aid && jget('friendAids', []).includes(+f.aid)) return true;
     return jget('friendTags', []).map(tagNorm).includes(tag);
   };
-  async function friendsChore() {                                        // be naršymo: aljanso puslapis per fetch, kas ~1 val.
+  async function friendsChore() {                                        // aljanso puslapis (atidaromas, kaip žmogus), kas ~1 val.
     if (Date.now() < (GM_getValue('friendsNext', 0) || 0)) return;
     GM_setValue('friendsNext', Date.now() + rand(50, 70) * 60000);
     try {
-      const h = await (await fetch('/alliance/profile', { credentials: 'same-origin' })).text();
-      const d = new DOMParser().parseFromString(h, 'text/html');
+      const d = navDoc('/alliance/profile', 90);                          // aljanso puslapis – ATIDAROMAS
+      if (!d) { GM_setValue('friendsNext', Date.now() + rand(8, 15) * 60000); return; }
       const txt = clean((d.querySelector('#content') || d.body).textContent || '').replace(/\s+/g, ' ');
       const tm = txt.match(/(?:Sutrumpinimas|Tag)\s+(\S+)/i);
       if (!tm) return;                                                    // neatpažinau (ar aljanso nėra) – paliekam, kas žinoma (saugiau)
@@ -2070,11 +2171,11 @@
   async function lastOasisLoot() {
     const cached = jget('oaLootCache', null);
     if (cached && Date.now() - cached.ts < 5 * 60000) return cached.m;             // ne dažniau kaip kas 5 min.
-    const out = {};
+    const out = {}; let miss = false;
     try {
       for (const p of [1, 2]) {
-        const h = await (await fetch('/report/offensive?page=' + p, { credentials: 'same-origin' })).text();
-        const d = new DOMParser().parseFromString(h, 'text/html');
+        const d = navDoc('/report/offensive?page=' + p, 30);              // puolimų ataskaitų sąrašas – ATIDAROMAS
+        if (!d) { miss = true; break; }
         for (const tr of d.querySelectorAll('table tbody tr')) {
           const t = tr.innerText.replace(/[‪-‮]/g, '').replace(/[−–]/g, '-');
           if (!/oaz/i.test(t)) continue;
@@ -2084,10 +2185,10 @@
           const k = (+m[1]) + '|' + (+m[2]);
           if (!out[k]) out[k] = { got: +cm[1], cap: +cm[2], ts: reportTs(t) };       // sąrašas nuo naujausių
         }
-        await sleep(rand(400, 1000));
       }
     } catch (e) {}
-    jset('oaLootCache', { ts: Date.now(), m: out });
+    if (miss && cached) return cached.m;                                   // sąrašas dar neatidarytas – senesnė žinia geriau nei jokios
+    if (!miss) jset('oaLootCache', { ts: Date.now(), m: out });
     return out;
   }
   // Tolimų oazių sąrašas (tik oazių langeliai) – žemėlapis skenuojamas ne dažniau kaip kas EI_FAR_SCAN_MIN; tikslus būvis tikrinamas prieš siuntimą
@@ -2966,9 +3067,9 @@
     try {
       const list = [];
       for (const c of [1, 2, 3]) {
-        const d = new DOMParser().parseFromString(await (await fetch(`/build.php?id=${free[0]}&category=${c}`, { credentials: 'same-origin' })).text(), 'text/html');
+        const d = navDoc(`/build.php?id=${free[0]}&category=${c}`, 60);     // „Statyti naują pastatą“ skirtukai – ATIDAROMI
+        if (!d) { vset('cbNext', Date.now() + rand(10, 20) * 60000); return; }
         for (const e of d.querySelectorAll('[id^=contract_building]')) { const g = parseInt(e.id.replace('contract_building', ''), 10); const h = (e.closest('.buildingWrapper') || e.parentElement).querySelector('h2'); if (g && !list.some(x => x.gid === g)) list.push({ gid: g, cat: c, name: clean((h || {}).textContent || '').replace(/^\d+\.\s*/, '').trim() }); }
-        await sleep(rand(400, 900));
       }
       vset('canBuild', { ts: Date.now(), list });
     } catch (e) {}
@@ -3350,7 +3451,8 @@
       let details = 0, added = 0, intel = 0;
       // Sąraše (patikrinta): „Žaidėjas užpuolė reidu / atakavo / ištyrė Taikinys – laikas“. „Gamta“ – oazės, „Natars“ – natarai: praleidžiam
       for (let pg = 1; pg <= ALLY_REP_PAGES && details < 15; pg++) {
-        const d = new DOMParser().parseFromString(await (await fetch('/alliance/reports?page=' + pg, { credentials: 'same-origin' })).text(), 'text/html');
+        const d = navDoc('/alliance/reports?page=' + pg, 45);             // aljanso ataskaitų sąrašas – ATIDAROMAS
+        if (!d) break;
         const rows = [...d.querySelectorAll('table tbody tr')];
         if (!rows.length) break;
         for (const r of rows) {
@@ -3361,11 +3463,11 @@
           if (/Gamta|oaz|oasis/i.test(txt)) continue;                    // natarų ataskaitos – naudingos (jų kaimai – taikiniai)
           const key = a.slice(0, 60);
           if (seen.includes(key)) continue;
-          seen.push(key);
-          details++;
           const href = a.startsWith('?') ? '/report' + a : a;
-          const h = await (await fetch(href, { credentials: 'same-origin' })).text();
-          const dd2 = new DOMParser().parseFromString(h, 'text/html');
+          const dd2 = await repDoc(href);
+          details++;
+          if (!dd2) continue;                                               // dar neatidaryta – eilėje; nežymim perskaityta
+          seen.push(key);
           const defBox = dd2.querySelector('.role.defender') || dd2;
           const tl = [...defBox.querySelectorAll('a[href*="karte.php?d="]')].map(x => +((x.getAttribute('href').match(/d=(\d+)/) || [])[1] || 0)).find(Boolean);
           if (!tl) continue;
@@ -3386,7 +3488,6 @@
             }
           }
           log(`Aljanso ataskaita: ${k} – gynėjų ${dd ? dd.units : '?'}, grobis ${pr ? pr.loot : '?'}${f ? '' : ' (kaimas dar ne mūsų sąraše)'}`);
-          await sleep(rand(400, 1000));
         }
       }
       raidsMerge(raids, rOrigA); jset('farms', farms); jset('allyRepSeen', seen.slice(-600));
@@ -3403,7 +3504,8 @@
     let opened = 0;
     try {
       for (let pg = 1; pg <= 4 && opened < 25; pg++) {
-        const d = new DOMParser().parseFromString(await (await fetch('/report?page=' + pg, { credentials: 'same-origin' })).text(), 'text/html');
+        const d = navDoc('/report?page=' + pg, 30, pg <= 2);              // tie patys sąrašo puslapiai kaip ataskaitoms; 3–4 – tik jei jau atidaryti
+        if (!d) break;
         const rows = [...d.querySelectorAll('table tbody tr')];
         if (!rows.length) break;
         let old = false;
@@ -3416,19 +3518,19 @@
           const mDef = !mOff && own.find(n => new RegExp('(užpuolė reidu|užpuolė|atakavo) ' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' (šiandien|vakar)').test(txt));
           if (!mOff && !mDef) { seen.add(id); continue; }
           if (opened >= 25) break;
+          // pelnui ataskaitų atskirai neatidarinėjam: naudojam jau atidarytas (plėšimų ataskaitos), kitoms – grobis iš sąrašo (krepšelio „x/talpa“), nuostolis nežinomas
+          const rd = await repDoc(a, false);
           opened++;
-          const rd = await repDoc(a);
           const g = rd && [...rd.querySelectorAll('th')].find(e => /^(Grobis|Bounty)$/i.test(e.textContent.trim()));
-          const loot = g ? [...g.closest('tr').querySelectorAll('.resourceWrapper .value')].slice(0, 4).reduce((s2, e) => s2 + nv(e), 0) : 0;
+          const cIc = r.querySelector('[class*=carry]'), cM = cIc && (cIc.getAttribute('alt') || cIc.getAttribute('title') || '').match(/(\d+)\s*\/\s*(\d+)/);
+          const loot = g ? [...g.closest('tr').querySelectorAll('.resourceWrapper .value')].slice(0, 4).reduce((s2, e) => s2 + nv(e), 0) : (cM ? +cM[1] : 0);
           const l = rd && [...rd.querySelectorAll('th')].find(e => /^(Prarasti resursai|Resources lost)$/i.test(e.textContent.trim()));
           const lv = l ? [...l.closest('tr').querySelectorAll('td')].map(td => nv(td)) : [0, 0];
           const kind = mDef ? 'gynyba' : /oaz|oasis/i.test(txt) ? 'oazės' : /Natars/i.test(txt) ? 'natarai' : 'kaimai';
           st.push({ id, ts, v: mOff || mDef, k: kind, loot: mDef ? -loot : loot, lost: mDef ? (lv[1] || 0) : (lv[0] || 0) });
           seen.add(id);
-          await sleep(rand(250, 600));
         }
         if (old) break;
-        await sleep(rand(300, 800));
       }
     } catch (e) { log('Pelno suvestinės klaida:', e && e.message); }
     jset('stats', st.filter(e => Date.now() - e.ts < 48 * 3600000).slice(-1500));
@@ -3447,7 +3549,7 @@
       <table style="border-collapse:collapse;width:100%"><tr style="background:#dde6f0"><th style="text-align:left;padding:3px">Kaimas</th><th>Kur</th><th>Kartų</th><th>Grobis</th><th>Prarasta</th><th>Pelnas</th></tr>
       ${rows.map(g => `<tr style="border-top:1px solid #dde"><td style="padding:3px">${g.v}</td><td>${g.k}</td><td style="text-align:right">${g.n}</td><td style="text-align:right">${f(g.loot)}</td><td style="text-align:right">${f(g.lost)}</td><td style="text-align:right;font-weight:bold;color:${g.loot - g.lost >= 0 ? '#270' : '#a22'}">${f(g.loot - g.lost)}</td></tr>`).join('')}
       <tr style="border-top:2px solid #357;font-weight:bold"><td style="padding:3px">Iš viso</td><td></td><td style="text-align:right">${tot.n}</td><td style="text-align:right">${f(tot.loot)}</td><td style="text-align:right">${f(tot.lost)}</td><td style="text-align:right;color:${tot.loot - tot.lost >= 0 ? '#270' : '#a22'}">${f(tot.loot - tot.lost)}</td></tr></table>
-      <div style="color:#555;margin-top:6px">„Prarasta“ – žuvusių karių kaina resursais. „gynyba“ – kai puolė tave: grobis su minusu (išnešta), prarasta – tavo žuvę kariai. Herojaus premija už gyvūnus oazėse neįskaičiuota. Atnaujinama kas ~20 min.</div>`;
+      <div style="color:#555;margin-top:6px">Ataskaitos atskirai neatidarinėjamos: grobis – iš sąrašo, „Prarasta“ – tik iš ataskaitų, kurias skriptas atidarė plėšimams. „Prarasta“ – žuvusių karių kaina resursais. „gynyba“ – kai puolė tave: grobis su minusu (išnešta), prarasta – tavo žuvę kariai. Herojaus premija už gyvūnus oazėse neįskaičiuota. Atnaujinama kas ~20 min.</div>`;
     document.body.appendChild(box);
     document.getElementById('abStX').onclick = () => box.remove();
   }
@@ -3456,12 +3558,12 @@
     GM_setValue('repNext', Date.now() + rand(10, 20) * 60000);
     try {
       const rows = [];
-      for (const pg of [1, 2, 3]) {                                       // ~30 naujausių ataskaitų (žvalgų daug – vieno puslapio neužtenka)
-        const d = new DOMParser().parseFromString(await (await fetch('/report?page=' + pg, { credentials: 'same-origin' })).text(), 'text/html');
+      for (const pg of [1, 2]) {                                          // ~20 naujausių ataskaitų – sąrašo puslapiai ATIDAROMI (ne fone)
+        const d = navDoc('/report?page=' + pg, 25);
+        if (!d) break;
         rows.push(...d.querySelectorAll('table tbody tr'));
-        await sleep(rand(300, 800));
       }
-      await readRaidReports(rows);
+      if (rows.length) await readRaidReports(rows);
     } catch (e) { log('Ataskaitų klaida:', e && e.message); }
     return false;
   }
@@ -3620,8 +3722,12 @@
   // Šio kaimo kariai kitur (pastiprinimas) – iš Susibūrimo vietos „Apžvalga“ (tt=1): lentelės su nuoroda „atsiimti“
   const UNIT_SPEED_R = { t1: 6, t2: 5, t3: 7, t4: 16, t5: 14, t6: 10, t7: 4, t8: 3, t9: 4, t10: 5, t11: 7 };
   async function recallCheck(attackAt) {
-    let d;
-    try { d = new DOMParser().parseFromString(await (await fetch('/build.php?gid=16&tt=1', { credentials: 'same-origin' })).text(), 'text/html'); } catch (e) { return false; }
+    const RP = '/build.php?gid=16&tt=1';
+    let d = navDoc(RP, 4, false);
+    if (!d) {                                                              // artėja puolimas – atidaryti susibūrimo vietą (ne dažniau kaip kas 8 min.)
+      if (Date.now() - (vget('recallVisit', 0) || 0) < 8 * 60000) return false;
+      vset('recallVisit', Date.now()); navGo(RP); return true;
+    }
     const me = villageXY(), vs = ownVillageList(), now = Date.now(), done = jget('recallDone', {});
     for (const t of d.querySelectorAll('table.troop_details')) {
       const a = [...t.querySelectorAll('a')].find(x => /atsiimti|withdraw/i.test(x.textContent));
@@ -3685,7 +3791,10 @@
     for (const e of due) {
       if ((inc[e.a] || 0) > now - 5 * 60000 && inc[e.a] - now < 60 * 60000) continue;          // ten artėja kitas puolimas – kariai lieka
       const A = vs.find(v => v.did === e.a); if (!A) { e.back = now; continue; }
-      if (!d) { try { d = new DOMParser().parseFromString(await (await fetch('/build.php?gid=16&tt=1', { credentials: 'same-origin' })).text(), 'text/html'); } catch (er) { return false; } }
+      if (!d) {
+        d = navDoc('/build.php?gid=16&tt=1', 5, false);
+        if (!d) { if (Date.now() - (vget('helpVisit', 0) || 0) < 8 * 60000) return false; vset('helpVisit', Date.now()); navGo('/build.php?gid=16&tt=1'); return true; }
+      }
       const rx = new RegExp('(Pastiprinimas|Reinforcement)[^:]*:\\s*' + A.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
       const t = [...d.querySelectorAll('table.troop_details')].find(tb => rx.test(clean(tb.textContent).replace(/\s+/g, ' ')) && [...tb.querySelectorAll('a')].some(x => /atsiimti|withdraw/i.test(x.textContent)));
       e.back = now; jset('helpSent', hs);
@@ -4215,10 +4324,10 @@
     if (c && c.mode) return c;
     return { mode: roleOf(did) === 'HAMMER' && !HAMMER_TRAIN ? 'off' : 'auto', units: {} };
   }
-  async function ownedTroops() {                                         // visi šio kaimo kariai (namie + išėję + grįžtantys) iš Susibūrimo vietos
+  async function ownedTroops(maxMin = 30, want = true) {                 // visi šio kaimo kariai (namie + išėję + grįžtantys) iš Susibūrimo vietos (atidarytos)
     try {
-      const h = await fetch('/build.php?gid=16&tt=1', { credentials: 'include' }).then(r => r.text());
-      const d = new DOMParser().parseFromString(h, 'text/html');
+      const d = navDoc('/build.php?gid=16&tt=1', maxMin, want);
+      if (!d) return null;
       const name = ownVillageName(), c = {};
       for (const t of d.querySelectorAll('table.troop_details')) {
         const role = clean((t.querySelector('thead td.role') || {}).textContent || '').trim();
@@ -4356,7 +4465,7 @@
     };
     render();
     document.body.appendChild(box);
-    ownedTroops().then(c => { if (c && document.getElementById('abTrain')) render(); });   // šio kaimo skaičiai – iškart
+    ownedTroops(24 * 60, false).then(c => { if (c && document.getElementById('abTrain')) render(); });   // šio kaimo skaičiai – iš paskutinio susibūrimo vietos atidarymo
   }
   // Badas: grūdų gamyba neigiama ir klėtis ištuštės per < STARVE_H val. – naujų karių nedarom (jie tik paspartintų badą; žaidimas pradeda žudyti karius)
   const STARVE_H = 6;
@@ -4504,7 +4613,8 @@
     }
     // grūdų balanso nebetikrinam – jį tvarko turgus ir statybos (tavo sprendimas)
     if (plan.target) {                                                    // PASIRINKTA: iki nurodyto skaičiaus (namie + išėję + eilėje)
-      const own = await ownedTroops();
+      const tcC = (jget('troopCnts', {}) || {})[DID];
+      const own = (await ownedTroops(45)) || (tcC && Date.now() - tcC.ts < 3 * 3600000 ? tcC.c : null);   // susibūrimo vieta neseniai neatidaryta – paskutiniai žinomi skaičiai
       if (!own) { setStatus('kariai: nepavyko suskaičiuoti turimų – palauksiu'); return finishChore(); }
       const have = (own[plan.unit] || 0) + queuedOnPage(plan.unit), need = plan.target - have;
       if (need <= 0) { const f = vget('trainFull', {}) || {}; f[plan.unit] = Date.now() + 30 * 60000; vset('trainFull', f); setStatus(`kariai: ${plan.label} jau ${have}/${plan.target}`); return finishChore(); }
@@ -4598,6 +4708,7 @@
     if (vlChore()) return true;                     // Aukso klubo sąrašas „Kaimai“ – saugūs taikiniai vienu paspaudimu
     // Ratu (round-robin): po kiekvieno atlikto darbo kitą kartą pirmenybė – KITAM. Anksčiau žvalgai (raidChore kas 1–3 min.)
     // visada laimėdavo, ir legionierių sąrašas, kariai, turgus, oazės nesulaukdavo eilės (316 legionierių stovėjo namie).
+    if (visitChore()) return true;                                          // laukiantys puslapiai (ataskaitos, aljansas…) – atidaryti kaip žmogus
     // NUOTYKIO EILĖ (po 2 puolimų): herojus namie – nuotykis pirmiau už visus kitus darbus (kitaip RR darbai jį nustumdavo)
     if (advDue() && heroAtHome() && attackInMin() >= HOLD_HERO_ADV_MIN && !heroHold() && Date.now() >= (GM_getValue('advDueNext', 0) || 0)) {
       GM_setValue('advDueNext', Date.now() + rand(3, 5) * 60000);
@@ -5388,7 +5499,7 @@
     if (inPause()) { setStatus('nakties pauzė (sargyba nuo puolimų veikia)'); pauseWatch(); return later(pauseWakeSec(), () => (location.href = '/dorf1.php')); }
     if (breakCheck()) return;
     try { postSupplyNeed(); } catch (e) {}                             // pažymėti trūkumą anksti – dar prieš šalutinius darbus
-    if (Date.now() - ((jget('troopCnts', {})[DID] || {}).ts || 0) > 15 * 60000) ownedTroops();   // karių suvestinei (fone, be naršymo)
+    if (Date.now() - ((jget('troopCnts', {})[DID] || {}).ts || 0) > 15 * 60000) ownedTroops(30);   // karių suvestinei (iš atidarytos susibūrimo vietos; sena – įrašoma į lankytinų eilę)
     // KARO REŽIMAS: statybų nėra – tik kariai, reidai, turgus ir t. t. IŠIMTIS: grūdų balansas žemas/neigiamas – keliami TIK grūdų laukai (kad kariai nebadautų)
     const fcW = (() => { const e = document.getElementById('stockBarFreeCrop'); const v = e ? parseInt(clean(e.textContent).replace(/[^\d-]/g, ''), 10) : NaN; return isNaN(v) ? null : v; })();
     const cropOnly = !GM_getValue('buildOn', true) && fcW !== null && fcW < WAR_CROP_MIN;
@@ -5426,11 +5537,20 @@
     // Taupymas įsikūrėjams: laukai keliami VISADA (tai nuolatinis augimas); stabdoma tik pastatų eilė ir karių treniravimas
     const saving = settlerSaving() && !nearFull;
 
+    // CENTRAS (dorf2) – tik atidarant: išsaugota kopija naudojama, kol statybų eilė nepasikeitė (ir ne senesnė nei 30 min.);
+    // pasikeitė (pastatas baigtas / pradėtas) – skriptas atidaro centrą, kaip žmogus, ir grįžta
     let builds;
-    try {
-      const r = await fetch('/dorf2.php', { credentials: 'same-origin' });
-      builds = readBuildings(new DOMParser().parseFromString(await r.text(), 'text/html'));
-    } catch (e) { setStatus('klaida skaitant centrą'); return scheduleNext(rand(...RETRY)); }
+    {
+      const e = navGet('/dorf2.php', 30), qb = qBuildCount(), age = e ? Date.now() - e.ts : Infinity;
+      const ok = e && e.builds && e.builds.length && (e.uc === qb || age < 10 * 60000);
+      if (!ok && Date.now() - (vget('d2Visit', 0) || 0) > 2 * 60000) { vset('d2Visit', Date.now()); vset('choreLast', true); setStatus('žiūriu centrą (dorf2)'); navGo('/dorf2.php'); return; }   // grįžus – statybų eilė (ne darbų)
+      if (!e || !e.builds || !e.builds.length) { setStatus('centro (dorf2) perskaityti nepavyko – bandysiu vėliau'); return scheduleNext(rand(...RETRY)); }
+      const st = [1, 2, 3, 4].map(i => num(document.getElementById('l' + i)));
+      builds = e.builds.map(b => {                                          // „galima statyti dabar“ – pagal DABARTINIUS resursus (kopija gali būti kelių min.)
+        const c = b.gid > 0 && !b.uc ? bCost(b.gid, b.lvl + 1) : null;
+        return c ? { ...b, good: b.lvl < 20 && c.every((v, i) => st[i] >= v) } : { ...b };
+      });
+    }
     if (!builds.length) { setStatus('NEPAVYKO perskaityti pastatų (dorf2) – reikia pataisyti skriptą'); return; }
     try { recordProgress(builds, readFields(document)); } catch (e) {}
     { const lv = {}; for (const b of builds) if (b.gid) lv[b.gid] = Math.max(lv[b.gid] || 0, b.lvl); vset('blv', lv); }
@@ -5646,7 +5766,9 @@
     };
     later(rand(200, 300), back);
   }
-  if (path.includes('dorf1')) onDorf1();
+  navCapture();                                                           // atidarytą puslapį išsaugoti, jei jo reikia (vietoj skaitymo fone)
+  if (chorePending('visit')) onVisit();
+  else if (path.includes('dorf1')) onDorf1();
   else if (path.includes('/tasks')) onTasks();
   else if (path.includes('/hero')) onHero();
   else if (path.includes('build') && chorePending('cp')) onCp();
@@ -5673,5 +5795,5 @@
   else if (path.includes('karte') && chorePending('siteScan')) onSiteScan();
   else if (path.includes('karte') && chorePending('eoScan')) onEoScan();
   else if (path.includes('karte')) onMap();
-  else if (/dorf2|statistics|report/.test(path)) onWander();
+  else if (/dorf2|statistics|report|alliance/.test(path)) onWander();
 })();
