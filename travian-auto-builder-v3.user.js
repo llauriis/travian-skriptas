@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.61
+// @version      20.62
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -91,7 +91,17 @@
   const LANE_SPLIT = 0.60;            // sandėlis ≥60 % – pirmenybė pastatams mieste, mažiau – laukams        // kas kiek min. ieškoti oazės (kai herojus namie)
   const OASIS_FIRST = false;        // false: pirma nuotykiai (kol yra), paskui oazės; true: pirma oazės, nuotykis – tik jei tinkamos oazės nėra
   const ALTERNATE = true;           // nuotykis → oazė → nuotykis → oazė ... kol baigiasi nuotykiai, paskui tik oazės (jei vieno iš jų nėra – imamas kitas)
-  const oasisTurn = () => ALTERNATE ? GM_getValue('lastTrip', '') === 'adv' : OASIS_FIRST;
+  // KARŽYGYS: ADV_EVERY_OASIS puolimai (oazės / plėšimai su herojumi) → nuotykis (jei yra) → vėl puolimai. Nuotykių nėra – tik puolimai
+  const ADV_EVERY_OASIS = 2;
+  function advDue() {
+    if (!ALTERNATE || !hc().adv) return false;
+    if ((GM_getValue('oasisSinceAdv', 0) || 0) < ADV_EVERY_OASIS) return false;
+    if (Date.now() < (GM_getValue('advNoneUntil', 0) || 0) && !advBadge()) return false;   // neseniai tikrinta – nuotykių nebuvo
+    if ((GM_getValue('heroHealth', 100) || 0) < hc().advMin) return false;
+    return true;
+  }
+  const oasisTurn = () => ALTERNATE ? !advDue() : OASIS_FIRST;
+  const heroAttackSent = () => GM_setValue('oasisSinceAdv', (GM_getValue('oasisSinceAdv', 0) || 0) + 1);
   const HEALTH_FRESH_MIN = 15;
   const HOLD_HERO_OASIS_MIN = 90;   // ateina puolimas per tiek min. – į oazes herojaus nesiųsti (gins kaimą)
   const HOLD_HERO_ADV_MIN = 240;    // ...į nuotykius – per tiek min.      // sveikatą prieš oazę perskaityti iš naujo, jei senesnė nei tiek min.
@@ -1858,7 +1868,7 @@
   // „Valymas“ su herojumi: herojus (jėga) – pagrindinė puolimo jėga; jo sveikatos nuostolis = tas pats procentas kaip kariams
   function heroPlan(def, avail, att) {
     const hAtt = GM_getValue('heroAttack', 0) || 0, health = GM_getValue('heroHealth', 0) || 0;
-    if (hc().clear && heroAtHome() && !heroHold() && hAtt > 0 && health >= hc().oasisMin) {
+    if (hc().clear && heroAtHome() && !heroHold() && !advDue() && hAtt > 0 && health >= hc().oasisMin) {   // nuotykio eilė – herojus nuotykiui
       const p = eiForClear(def, avail, att, hAtt);
       if (p && health - p.loss >= hc().oasisKeep) return { ...p, hero: true };
     }
@@ -3271,6 +3281,7 @@
       GM_setValue('chore', 'raidDone'); GM_setValue('choreTs', Date.now()); GM_setValue('navTs', Date.now());
       btn.click();
       const t = jget('raidTarget', null);
+      if (t && t.troops && t.troops.t11) heroAttackSent();                  // puolimas su herojumi – skaičiuojamas nuotykių eilei
       log('Plėšimas išsiųstas:', t);
       setStatus(`išsiųsta: ${t ? Object.entries(t.troops).map(([u, n]) => n + (u === 't4' ? ' žvalg.' : u === 't1' ? ' legion.' : u === 't3' ? ' imperion.' : u === 't11' ? ' herojus' : ' EI')).join(', ') + ' → ' + t.player + ' ' + t.x + '|' + t.y : ''}`);
       return;
@@ -4514,6 +4525,7 @@
 
   // Kai oazės įjungtos ir OASIS_FIRST – į nuotykį tik tada, kai paskutinė oazių paieška nieko nerado (ar hero per silpnas)
   function advAllowed() {
+    if (!heroAtHome()) return false;                                      // herojus kelyje – nuotykio „išsiuntimas“ nieko nedaro (anksčiau taip ir prarasdavo eilę)
     if (!oasisTurn() || GM_getValue('oasisMode', 'on') === 'off') return true;
     return Date.now() - (GM_getValue('oasisNoneTs', 0) || 0) < 25 * 60000;
   }
@@ -4586,6 +4598,13 @@
     if (vlChore()) return true;                     // Aukso klubo sąrašas „Kaimai“ – saugūs taikiniai vienu paspaudimu
     // Ratu (round-robin): po kiekvieno atlikto darbo kitą kartą pirmenybė – KITAM. Anksčiau žvalgai (raidChore kas 1–3 min.)
     // visada laimėdavo, ir legionierių sąrašas, kariai, turgus, oazės nesulaukdavo eilės (316 legionierių stovėjo namie).
+    // NUOTYKIO EILĖ (po 2 puolimų): herojus namie – nuotykis pirmiau už visus kitus darbus (kitaip RR darbai jį nustumdavo)
+    if (advDue() && heroAtHome() && attackInMin() >= HOLD_HERO_ADV_MIN && !heroHold() && Date.now() >= (GM_getValue('advDueNext', 0) || 0)) {
+      GM_setValue('advDueNext', Date.now() + rand(3, 5) * 60000);
+      GM_setValue('advNext', Date.now() + rand(...ADV_EVERY) * 60 * 1000);
+      startChore('advCheck', '/hero/adventures');
+      return true;
+    }
     const RR = [
       ['raid', () => raidChore()],
       ['fl', () => FARM_LIST_MODE ? farmListChore() : emptyOasisChore()],
@@ -4633,7 +4652,7 @@
         return true;
       }
     }
-    if (!oasisTurn() && oasisChore()) return true;
+    if (!ALTERNATE && !oasisTurn() && oasisChore()) return true;          // kaitaliojant (ALTERNATE) nuotykio eilės metu herojaus į oazę nesiunčiam
     if (WANDER && Math.random() < 0.10 && Date.now() >= (GM_getValue('wanderNext', 0) || 0)) {
       GM_setValue('wanderNext', Date.now() + rand(25, 60) * 60000);
       const pages = ['/dorf2.php', '/statistics', '/report'];
@@ -4858,7 +4877,8 @@
     await sleep(rand(2500, 4000));
     if (isAds) return watchAdvAds();
     const btns = explorable();
-    if (!btns.length) { setStatus('nuotykių nėra'); return finishChore(); }
+    if (!btns.length) { GM_setValue('advNoneUntil', Date.now() + rand(25, 40) * 60000); setStatus('nuotykių nėra – karžygys toliau puola'); return finishChore(); }
+    if (!heroAtHome()) { setStatus('nuotykis: karžygys kelyje – palauksiu'); return finishChore(); }
     if (isCheck) { startChore('heroHealth', '/hero/attributes'); return; }
     // Reklamos prieš siuntimą: trukmė −25 % ir (jei sveikata gera) sunkesnis nuotykis
     const hNow = GM_getValue('heroHealth', 0) || 0;
@@ -4884,9 +4904,10 @@
       }
     }
     const btns2 = explorable();
-    if (!btns2.length) { setStatus('nuotykių nebėra'); return finishChore(); }
+    if (!btns2.length) { GM_setValue('advNoneUntil', Date.now() + rand(25, 40) * 60000); setStatus('nuotykių nebėra'); return finishChore(); }
+    if (!heroAtHome()) { setStatus('nuotykis: karžygys kelyje – nesiunčiu'); return finishChore(); }
     btns2[0].click();
-    GM_setValue('lastTrip', 'adv'); GM_setValue('oasisNext', 0);
+    GM_setValue('lastTrip', 'adv'); GM_setValue('oasisNext', 0); GM_setValue('oasisSinceAdv', 0);
     log('Hero siunčiamas į nuotykį');
     await sleep(rand(2000, 3000));
     const dlg = document.querySelector('.dialogContents button.green');     // jei prašo patvirtinimo
@@ -5326,7 +5347,7 @@
       }
       if (!btn) { setStatus('oazės: patvirtinimo mygtuko nerasta – nesiunčiu'); return finishChore(); }
       GM_setValue('chore', 'oasisDone'); GM_setValue('choreTs', Date.now()); GM_setValue('navTs', Date.now());
-      GM_setValue('lastTrip', 'oasis');
+      GM_setValue('lastTrip', 'oasis'); heroAttackSent();
       { const tt = jget('oasisTarget', null); if (tt) jset('oasisBefore', { x: tt.x, y: tt.y, h: GM_getValue('heroHealth', 0) || 0, pred: tt.loss || 0, raw: tt.raw || 0, ei: tt.ei || 0, total: tt.total || 0, ts: Date.now() }); }
       btn.click();
       const t = jget('oasisTarget', null);
