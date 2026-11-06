@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.60
+// @version      20.61
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -1155,6 +1155,7 @@
     }
     }
     if (!res.field && !res.building && !done.field && !done.building) res.complete = true;
+    res.planDone = !FOCUS && !done.field && !done.building;                 // plano žingsnių nebeliko (laukai ir pastatai iki ribų) – kaimas pastatytas
     // EI KEPIMAS: kai grūdų balansas per mažas naujiems EI – keliam žemiausią grūdų lauką (statybos kitur – sustabdytos)
     if (eiRush() && fieldLaneFree && !res.field && typeof document !== 'undefined') {
       const fcEl = document.getElementById('stockBarFreeCrop');
@@ -1166,14 +1167,14 @@
       }
     }
     // Grūdų laukai po truputį – kai sandėlis ≥ 60 % ir laukų eilė dabar neturi ką daryti (ar plano laukui dar trūksta)
-    if (!FOCUS && CROP_SURPLUS_ROLES.includes(ROLE) && fieldLaneFree && !res.field && Math.max(have[0], have[1], have[2]) / (caps.w || 1) >= CROP_SURPLUS_FILL) {
+    if (!FOCUS && CROP_SURPLUS_ROLES.includes(ROLE) && fieldLaneFree && !res.field && (Math.max(have[0], have[1], have[2]) / (caps.w || 1) >= CROP_SURPLUS_FILL || (res.planDone && drainWanted(true)))) {   // pastatytas kaimas siunčia viską į HAMMER – grūdų laukui resursai atidedami (drainChore)
       const cf = fields.filter(f => f.gid === 4 && !f.uc && f.good && effLvl(f) < CROP_SURPLUS_MAX && !isSkipped('f' + f.slot)).sort((a, b) => a.lvl - b.lvl)[0];
       if (cf) { res.field = { lane: 'field', kind: 'upgrade', slot: cf.slot, gid: 4, key: 'f' + cf.slot, desc: `grūdų laukas #${cf.slot} → ${cf.lvl + 1} (perteklius)` }; res.complete = false; }
     }
     if (FOCUS && !res.building) { res.complete = false; res.desc = eiRush() ? 'EI kepimas – statybos sustabdytos' : 'antras kaimas: laukiu resursų Rezidencijai / įsikūrėjams'; }
 
     // 3) Užpildas: plano pastatui (atnaujinimui) dabar nepakanka resursų – kelti pigiausią įmanomą esamą pastatą
-    if (FILLER && !FOCUS && free.building && !nightWH) {
+    if (FILLER && !FOCUS && free.building && !nightWH && !(res.planDone && drainWanted(true))) {   // pastatytas kaimas – užpildų nebestatom, resursai keliauja į HAMMER
       const plannedSlot = res.building && res.building.kind === 'upgrade' ? builds.find(x => x.slot === res.building.slot) : null;
       const plannedBlocked = blockedB || (plannedSlot && !plannedSlot.good) || (!res.building && !res.complete);
       if (plannedBlocked && !(res.building && res.building.kind === 'new')) {
@@ -3119,6 +3120,50 @@
     }
     return false;
   }
+  // ---- PASTATYTAS KAIMAS → HAMMER: kai plano nebeliko (laukai ir pastatai iki tavo ribų), statybų užsakymų nėra ir kaime nenustatyta gaminti karių –
+  //      kaime lieka tik DRAIN_KEEP (5 %) sandėlio + resursai kitam grūdų laukui (keliami po vieną, iki CROP_SURPLUS_MAX), visa kita – į HAMMER,
+  //      tik tiek, kiek HAMMER priims (destRoom). HAMMER iš to nuolat gamina karius (perpildymo apsauga) ----
+  const DRAIN_KEEP = 0.05, DRAIN_EVERY = [8, 15];
+  function drainWanted(ignorePlan) {
+    if (ROLE === 'HAMMER' || !GM_getValue('buildOn', true)) return false;
+    if (!ignorePlan) { const ts = vget('planDoneTs', 0) || 0; if (!ts || Date.now() - ts > 3 * 3600000) return false; }
+    if (myOrders().length || settlerSaving()) return false;
+    if (!ownVillageList().some(v => roleOf(v.did) === 'HAMMER')) return false;
+    const tc = trainCfgFor(DID);
+    if (tc.mode === 'custom') {                                           // PASIRINKTA ir dar ne visi kariai pagaminti iki „iki kiek“ – kaimas dar gamina sau
+      const cnt = ((jget('troopCnts', {}) || {})[DID] || {}).c || {};
+      if (Object.entries(tc.units || {}).some(([u, m]) => m > 0 && UNITS_R[u] && ((vget('blv', {}) || {})[UNITS_R[u].g] || 0) >= 1 && (cnt[u] || 0) < m)) return false;
+    }
+    return true;
+  }
+  function drainKeep(st) {                                                 // kiek palikti: 5 % + kito grūdų lauko kaina (jei dar yra ką kelti)
+    const keep = [0, 1, 2, 3].map(k => Math.ceil(DRAIN_KEEP * (k < 3 ? st.cw : st.cg)));
+    if (CROP_SURPLUS_ROLES.includes(ROLE)) {
+      const cf = (vget('fldList', []) || []).filter(f => f.gid === 4 && f.lvl + (f.uc ? 1 : 0) < CROP_SURPLUS_MAX).sort((a, b) => a.lvl - b.lvl)[0];
+      const c = cf && !(vget('fldList', []) || []).some(f => f.uc) ? bCost(4, cf.lvl + 1) : null;   // laukas jau statomas – kito dar nereikia
+      if (c) c.forEach((v, k) => (keep[k] += v));
+    }
+    return keep;
+  }
+  function drainChore() {
+    if (Date.now() < (vget('drainNext', 0) || 0) || !drainWanted()) return false;
+    vset('drainNext', Date.now() + rand(...DRAIN_EVERY) * 60000);
+    const mc = (jget('mktCfg', {}).v || {})[DID] || {};
+    if (mc.mode === 'off') return false;                                  // „Nesiųsti“ lange „Turgus“ – gerbiam
+    const vs = ownVillageList(), hd = (vs.find(v => roleOf(v.did) === 'HAMMER') || {}).did, tv = vs.find(v => v.did === hd);
+    if (!tv || tv.x === null || attackSoon(String(hd), 60)) return false;
+    const st = stockInfo(); if (!st.cw) return false;
+    const room = destRoom(hd, 0.95, 45);
+    if (!room) { setStatus(`kaimas pastatytas → „${tv.name}“: jo sandėlio duomenys seni – laukiu`); return false; }
+    const keep = drainKeep(st);
+    const send = [0, 1, 2, 3].map(k => Math.max(0, Math.min(room[k], Math.floor(st.have[k] - keep[k]))));
+    if (send.reduce((a, b) => a + b, 0) < SUPPLY_MIN) { setStatus(`kaimas pastatytas → „${tv.name}“: siųsti dar nėra ko (palieku ${keep.join('/')}, „${tv.name}“ priims ${room.join('/')})`); return false; }
+    log(`KAIMAS PASTATYTAS → „${tv.name}“: ${send.join('/')} (palieku ${keep.join('/')})`);
+    setStatus(`kaimas pastatytas – siunčiu į „${tv.name}“ ${send.join('/')}`);
+    jset('supplyPlan', { did: String(hd), x: tv.x, y: tv.y, send: send.slice(0, 3), crop: send[3], route: true });
+    startChore('supply', '/build.php?gid=17&t=5');
+    return true;
+  }
   function supplyChore() {
     noteStock();
     if (shipOrderChore()) return true;                                     // tavo nurodyti kiekiai – pirmiau už viską
@@ -4506,6 +4551,7 @@
     { const t = jget('aucTarget', null);
       if (t && GM_getValue('aucMode', 'test') !== 'off') { jset('aucTarget', null); if (Date.now() - t.ts < 180000) { startChore('auction', t.url); return true; } } }
     if (ovfChore()) return true;                                            // resursai bėga per kraštus – pirmiausia
+    if (drainChore()) return true;                                          // pastatytas kaimas – resursai į HAMMER karių gamybai
     // Užduočių burbulas (!) – surinkti atlygį ir netrukus perkelti iš kuprinės į sandėlį
     if (COLLECT_TASKS && questBadge() && Date.now() >= (GM_getValue('questBadgeNext', 0) || 0)) {
       GM_setValue('questBadgeNext', Date.now() + rand(10, 18) * 60 * 1000);
@@ -5385,6 +5431,7 @@
     if (saving) free.building = false;
 
     const d = decide(fields, builds, have, caps, free, blockedB);
+    vset('planDoneTs', d.planDone ? Date.now() : 0);                     // kaimas pastatytas – perteklius keliaus į HAMMER (drainChore)
     if (!GM_getValue('buildOn', true) && !cropOnly) { d.building = null; d.field = null; }   // karo režimas: tik užsakymai
     { const oa = orderAction(fields, builds, free); if (oa.demolish) return; if (oa.field) d.field = oa.field; if (oa.building) d.building = oa.building; if (oa.field || oa.building) d.ordered = true; }
     { const tres = trainReserve();                                          // rezervas kariams – statybos jo neliečia
