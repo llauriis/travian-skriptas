@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.57
+// @version      20.58
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -3099,7 +3099,7 @@
     }
     if (top >= (ROLE === 'HAMMER' ? OVF_TRAIN_H : OVF_TRAIN)) {
       const tc = trainCfgFor(DID);
-      if (tc.mode === 'custom') { log(`PERPILDYMAS (${Math.round(top * 100)} %): kariai iš pertekliaus`); return trainCustom(tc, true); }
+      if (tc.mode !== 'off') return ovfTrain();                         // pažymėti naudingi kariai (Legionieriai, Imp. raiteliai), iki 20 val. eilės
     }
     return false;
   }
@@ -4076,10 +4076,13 @@
     t7: { n: 'Mūradaužys', g: 21, up: 3 }, t8: { n: 'Ugninė katapulta', g: 21, up: 6 },
   };
   const UCOST = { t1: [120, 100, 150, 30], t2: [100, 130, 160, 70], t3: [150, 160, 210, 80], t4: [140, 160, 20, 40], t5: [550, 440, 320, 100], t6: [550, 640, 800, 180], t7: [900, 360, 500, 70], t8: [950, 1350, 600, 90] };   // romėnų kainos
-  // PERPILDYMAS: kurį karį treniruoti – tą, kuris daugiausia sunaudoja BĖGANČIO per kraštus resurso (pvz. geležies). Pirmiau – dar nepasiekę tavo „iki kiek“;
-  // jei visi pasiekę – virš ribos tik koviniai kariai, NIEKADA ne žvalgai (Raiti legatai beveik nenaudoja geležies ir perteklių nenaikina)
-  function ovfPick(units) {
-    const st = stockInfo(), cnt = ((jget('troopCnts', {}) || {})[DID] || {}).c || {};
+  // PERPILDYMAS: perteklius virsta TIK naudingais kariais – tais, kuriuos pažymėjai lange „Kariai“ (numatytai Legionieriai ir Imperatoriaus raiteliai).
+  // „Iki kiek“ ribos čia negalioja (perteklius vis tiek turi būti sunaudotas); pastato eilė – iki OVF_QUEUE_H valandų į priekį.
+  // Iš pažymėtų renkamas tas, kuris daugiausia sunaudoja BĖGANČIO per kraštus resurso (pvz. geležies)
+  const OVF_UNITS_DEF = ['t1', 't5'], OVF_QUEUE_H = 20;
+  const ovfUnits = () => { const l = jget('ovfUnits', null); return Array.isArray(l) ? l : OVF_UNITS_DEF; };
+  function ovfPick() {
+    const st = stockInfo(), lv = vget('blv', {}) || {}, full = vget('trainFull', {}) || {}, qEnd = vget('qEnd', {}) || {}, now = Date.now();
     const capOf = k => (k < 3 ? st.cw : st.cg) || 1, thr = ROLE === 'HAMMER' ? OVF_TRAIN_H : OVF_TRAIN;
     const hot = [0, 1, 2, 3].filter(k => st.have[k] / capOf(k) >= thr);
     const sink = u => {
@@ -4087,9 +4090,25 @@
       const n = Math.floor(Math.min(...st.have.map((h, i) => (h * 0.9) / c[i])));
       return n < 1 ? 0 : hot.reduce((a, k) => a + Math.min(n * c[k], st.have[k] - OVF_KEEP * capOf(k)) / capOf(k), 0);
     };
-    const cand = units.map(([u, m]) => { const under = (cnt[u] || 0) < m; return { u, m, under, s: sink(u) * (under ? 1.5 : 1) }; })
-      .filter(x => x.s > 0 && (x.under || x.u !== 't4')).sort((a, b) => b.s - a.s);
-    return { best: cand[0] || null, hot };
+    const why = [];
+    const cand = ovfUnits().filter(u => {
+      const R = UNITS_R[u]; if (!R) return false;
+      if ((lv[R.g] || 0) < 1) { why.push(`${R.n}: nėra pastato`); return false; }
+      if (full[u] > now) { why.push(`${R.n}: neištirtas`); return false; }
+      if ((qEnd[R.g] || 0) - now >= OVF_QUEUE_H * 3600000) { why.push(`${R.n}: eilė ≥ ${OVF_QUEUE_H} val.`); return false; }
+      return true;
+    }).map(u => ({ u, s: sink(u) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s);
+    return { best: cand[0] || null, hot, why };
+  }
+  function ovfTrain() {
+    if (!GM_getValue('trainOn', true)) return false;
+    if (starveRisk()) { setStatus('perpildymas: grūdų balansas neigiamas – kariai negaminami'); return false; }
+    const { best: b, hot, why } = ovfPick();
+    if (!b) { setStatus('perpildymas: negaliu gaminti pažymėtų karių' + (why.length ? ' (' + why.join(', ') + ')' : '')); return false; }
+    jset('trainPlan', { unit: b.u, label: UNITS_R[b.u].n, share: 0.9, max: 500, ahead: 0, ovf: true, hot });
+    log(`PERPILDYMAS: ${['mediena', 'molis', 'geležis', 'grūdai'].filter((x, k) => hot.includes(k)).join(', ')} → ${UNITS_R[b.u].n}`);
+    startChore('train', '/build.php?gid=' + UNITS_R[b.u].g);
+    return true;
   }
   const CUSTOM_SHARE = 0.25;         // PASIRINKTA: vienu kartu – iki tokios atsargų dalies
   const CUSTOM_MAX_BATCH = 40;       // ir ne daugiau tiek vienetų
@@ -4153,9 +4172,9 @@
     for (const [u] of units) if (spent[u] == null) spent[u] = Math.max(0, base - 1);   // naujas tipas – vos mažiau už mažiausią (pirmas eina jis, paskui – lygiai)
     return units.slice().sort((a, b) => spent[a[0]] - spent[b[0]])[0];
   }
-  function trainCustom(tc, ovf = false) {
+  function trainCustom(tc) {
     if (!GM_getValue('trainOn', true)) return false;
-    if (!ovf && Date.now() < (vget('trainNext', 0) || 0)) {                       // eilė į priekį – kai kurio pastato eilė baigiasi, nelaukti įprasto laiko
+    if (Date.now() < (vget('trainNext', 0) || 0)) {                       // eilė į priekį – kai kurio pastato eilė baigiasi, nelaukti įprasto laiko
       const ah = +tc.ahead || 0, qE = vget('qEnd', {}) || {};
       const due = ah > 0 && Object.entries(tc.units || {}).some(([uu, m]) => m > 0 && UNITS_R[uu] && Date.now() > (vget('qChk', 0) || 0) && (qE[UNITS_R[uu].g] || 0) - Date.now() < ah * 60000 / 2);
       if (!due) return false;
@@ -4163,17 +4182,8 @@
     const fcEl = document.getElementById('stockBarFreeCrop');
     const fc = fcEl ? parseInt(clean(fcEl.textContent).replace(/[^\d-]/g, ''), 10) : 0;
     const lv = vget('blv', {}) || {}, full = vget('trainFull', {}) || {};
-    const units = Object.entries(tc.units || {}).filter(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && (ovf || !(full[u] > Date.now())));
+    const units = Object.entries(tc.units || {}).filter(([u, m]) => m > 0 && UNITS_R[u] && (lv[UNITS_R[u].g] || 0) >= 1 && !(full[u] > Date.now()));
     if (!units.length) return false;
-    if (ovf) {                                                              // PERPILDYMAS – karys pagal bėgantį resursą, žvalgai – ne virš tavo ribos
-      const { best: b, hot } = ovfPick(units);
-      if (!b) { setStatus('perpildymas: nėra kario, kuris sunaudotų perteklių (žvalgai – ne virš ribos)'); return false; }
-      vset('trainNext', Date.now() + rand(...CUSTOM_EVERY) * 60000);
-      jset('trainPlan', { unit: b.u, label: UNITS_R[b.u].n, share: 0.9, max: 500, ahead: 0, ovf: true, hot, target: b.under ? b.m : 0 });
-      log(`PERPILDYMAS: ${['mediena', 'molis', 'geležis', 'grūdai'].filter((x, k) => hot.includes(k)).join(', ')} → ${UNITS_R[b.u].n}${b.under ? ` (iki ${b.m})` : ' (virš ribos – kovinis)'}`);
-      startChore('train', '/build.php?gid=' + UNITS_R[b.u].g);
-      return true;
-    }
     const spent = vget('trainSpent', {}) || {};
     // EILĖ Į PRIEKĮ: jei nustatyta (pvz. 30 min.) – pirmiau tas pastatas, kurio eilė trumpiausia ir trumpesnė už nustatytą
     const ahead = +tc.ahead || 0, qEnd = vget('qEnd', {}) || {}, now = Date.now();
@@ -4255,6 +4265,8 @@
         })()}
         <div style="color:#555;margin:6px 0">„Turi“ – visi šio kaimo kariai (namie ir išėję), atnaujinama kai skriptas treniruoja. Vienu kartu – iki ${Math.round(CUSTOM_SHARE * 100)} % atsargų, tikrinama kas ${CUSTOM_EVERY[0]}–${CUSTOM_EVERY[1]} min. Grūdų balansas netikrinamas. Įsikūrėjai ir gelbėjimas nuo puolimo veikia visada.</div>
         <div style="margin:6px 0">Eilė į priekį (PASIRINKTA): ne mažiau kaip <input id="abTrAh" type="number" min="0" max="600" value="${+tc.ahead || 0}" style="width:50px"> min. karių kiekviename pastate (0 – išjungta)</div>
+        <div style="margin:6px 0"><b>Perteklius → kariai</b> <span style="color:#555">(visi kaimai; kai sandėlis pilnėja – gaminami tik šie, nepaisant „iki kiek“, eilė iki ${OVF_QUEUE_H} val.)</span><br>
+          ${Object.entries(UNITS_R).map(([u, d]) => `<label style="margin-right:8px;white-space:nowrap"><input type="checkbox" data-o="${u}"${ovfUnits().includes(u) ? ' checked' : ''}> ${d.n}</label>`).join('')}</div>
         <button id="abTrS" style="border:0;background:#686;color:#fff;border-radius:4px;padding:4px 12px;cursor:pointer;font-weight:bold">Išsaugoti</button> <span id="abTrOk" style="color:#383"></span>`;
       box.querySelector('#abTrX').onclick = () => box.remove();
       box.querySelector('#abTrAll').onclick = () => { GM_setValue('trainOn', !GM_getValue('trainOn', true)); render(); };
@@ -4265,6 +4277,7 @@
         const units = {}; box.querySelectorAll('#abTrU input[data-u]').forEach(i => { const v = Math.max(0, parseInt(i.value, 10) || 0); if (v) units[i.dataset.u] = v; });
         const ahead = Math.max(0, Math.min(600, parseInt((box.querySelector('#abTrAh') || {}).value, 10) || 0));
         const smith = {}; box.querySelectorAll('#abTrK input[data-k]').forEach(i => { const v = Math.max(0, Math.min(20, parseInt(i.value, 10) || 0)); if (v) smith[i.dataset.k] = v; });
+        jset('ovfUnits', [...box.querySelectorAll('input[data-o]')].filter(i => i.checked).map(i => i.dataset.o));
         const all = jget('trainCfg', {}); all[cur] = { mode, units, ahead, smith }; jset('trainCfg', all); GM_setValue('smithNext@' + cur, 0);
         GM_setValue('trainNext@' + cur, 0); GM_setValue('trainFull@' + cur, {});
         box.querySelector('#abTrOk').textContent = 'išsaugota';
@@ -4359,7 +4372,7 @@
     const inp = document.querySelector(`input[name=${plan.unit}]`);
     const btn = document.querySelector('button.startTraining');
     if (!inp || !btn) {
-      if (plan.target) { const f = vget('trainFull', {}) || {}; f[plan.unit] = Date.now() + 120 * 60000; vset('trainFull', f); }   // neištirta ar pastato nėra – 2 val. nebandyti
+      if (plan.target || plan.ovf) { const f = vget('trainFull', {}) || {}; f[plan.unit] = Date.now() + 120 * 60000; vset('trainFull', f); }   // neištirta ar pastato nėra – 2 val. nebandyti
       setStatus(`kariai: ${plan.label} forma nerasta (neištirta?)`); return finishChore();
     }
     const det = inp.closest('.details') || inp.parentElement.parentElement;
@@ -4413,6 +4426,11 @@
     // EILĖ Į PRIEKĮ: kiek dabar treniruojama šiame pastate (sekundėmis) ir kiek trunka vienas karys
     const qSec = Math.max(0, ...[...document.querySelectorAll('table.under_progress td.dur .timer, table.under_progress td.dur [value]')].map(e => +e.getAttribute('value') || 0));
     const durEl = det.querySelector('.inlineIcon.duration .value'), unitSec = durEl ? clean(durEl.textContent).split(':').reduce((a, x) => a * 60 + (+x || 0), 0) : 0;
+    if (plan.ovf && qSec >= OVF_QUEUE_H * 3600) {                          // perpildymas: eilė jau ≥ 20 val. – užtenka
+      const qE = vget('qEnd', {}) || {}, g = (UNITS_R[plan.unit] || {}).g; if (g) { qE[g] = Date.now() + qSec * 1000; vset('qEnd', qE); }
+      setStatus(`perpildymas: ${plan.label} eilė jau ${Math.round(qSec / 3600)} val.`); return finishChore();
+    }
+    if (plan.ovf && unitSec > 0) n = Math.min(n, Math.max(0, Math.floor((OVF_QUEUE_H * 3600 - qSec) / unitSec)));
     if (plan.ahead > 0 && unitSec > 0 && !plan.exact) {
       const nFill = Math.ceil((plan.ahead * 60 - qSec) / unitSec);
       if (nFill > n) { const nAll = Math.floor(Math.min(...have.map((h, i) => h / cost[i]))); n = Math.max(n, Math.min(nFill, nAll, 500)); }
