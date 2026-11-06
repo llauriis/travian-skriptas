@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Travian auto-builder v3 (daugiakaimis, rolės)
 // @namespace    local.travian.autobuilder.v2
-// @version      20.59
+// @version      20.60
 // @description  Kelia kaimus pagal rolę (resursų startas, sostinė, puolimo, resursų kaimai). Romėnams – lygiagrečiai laukas + pastatas. Renka užduočių atlygius, perkelia hero resursus, siunčia hero į nuotykius.
 // @match        *://*.travian.com/dorf1.php*
 // @match        *://*.travian.com/build.php*
@@ -2827,9 +2827,27 @@
     return { did: e.getAttribute('data-did'), name: clean((e.querySelector('.name') || {}).textContent || '').trim(), x: m ? +m[1] : null, y: m ? +m[2] : null };
   }).filter(v => v.did);
   const attackSoon = (did, min) => { const t = (jget('incoming', {}) || {})[did]; return !!(t && t - Date.now() < min * 60000 && t > Date.now() - 5 * 60000); };
-  function noteStock() {                                                   // kiekvieno kaimo sandėlio būklė – gavėjo vietai apskaičiuoti
+  function noteStock() {                                                   // kiekvieno kaimo sandėlio būklė (+ valandinė gamyba) – gavėjo vietai apskaičiuoti
     const st = stockInfo(); if (!st.cw) return;
-    const a = jget('villStock', {}); a[DID] = { have: st.have, cw: st.cw, cg: st.cg, ts: Date.now() }; jset('villStock', a);
+    const a = jget('villStock', {}), prev = a[DID] || {};
+    const pr = [...document.querySelectorAll('#production .num')].map(e => parseInt(clean(e.textContent).replace(/[^\d-]/g, ''), 10) || 0);
+    a[DID] = { have: st.have, cw: st.cw, cg: st.cg, ts: Date.now(), prod: pr.length >= 4 ? pr.slice(0, 4) : prev.prod || null }; jset('villStock', a);
+  }
+  // KIEK GAVĖJAS DAR PRIIMS (iki fill dalies sandėlio), kad niekas nebėgtų per kraštus:
+  //  paskutinė jo sandėlio būklė + jo gamyba nuo tada + visi siuntiniai, kurie tuo metu dar nebuvo atvykę (pakeliui).
+  //  Pirklio greitis imamas lėčiausias (16 lauk./val.) – siuntinys „pakeliui“ laikomas ilgiau, t.y. saugiau. Seni duomenys – null (nesiųsti aklai)
+  const MERCH_SPEED = 16;
+  function destRoom(dest, fill, maxAgeMin) {
+    const t = (jget('villStock', {}) || {})[String(dest)], now = Date.now();
+    if (!t || !t.cw || now - t.ts > maxAgeMin * 60000) return null;
+    const vs = ownVillageList(), b = vs.find(v => v.did === String(dest)), way = [0, 0, 0, 0];
+    for (const e of jget('sentLog', [])) {
+      if (e.to !== String(dest)) continue;
+      const f = vs.find(v => v.did === e.from), dist = f && b && f.x !== null && b.x !== null ? Math.hypot(f.x - b.x, f.y - b.y) : 30;
+      if (e.ts + (dist / MERCH_SPEED) * 3600000 + 5 * 60000 > t.ts) e.amt.forEach((x, i) => (way[i] += x || 0));   // dar nebuvo atvykęs, kai matėm sandėlį
+    }
+    const h = (now - t.ts) / 3600000, prod = t.prod || [0, 0, 0, 0];
+    return [0, 1, 2, 3].map(k => { const cap = k < 3 ? t.cw : t.cg, est = Math.min(cap, t.have[k] + Math.max(0, prod[k] || 0) * h); return Math.max(0, Math.floor(fill * cap - est - way[k])); });
   }
   // ---- SIUNTIMO UŽSAKYMAI (lange „Turgus“): iš kaimo A į kaimą B tiksliai nurodytas kiekis; vieną kartą arba kas N val.
   //      Jei dabar tiek nėra ar netelpa į prekeivius – siunčiama, kiek galima, likutis – kitą kartą ----
@@ -2866,11 +2884,9 @@
     const tv = ownVillageList().find(v => v.did === String(dest));
     if (!tv || tv.x === null || String(dest) === String(DID)) return false;
     if (attackSoon(String(dest), 60)) { setStatus(`turgus: į „${tv.name}“ artėja puolimas – nesiunčiu`); return false; }
-    const t = jget('villStock', {})[dest];
     const fill = Math.min(100, Math.max(10, +mc.fill || 90)) / 100;
-    const sent = [0, 0, 0, 0];
-    for (const e of jget('sentLog', [])) if (e.to === String(dest) && now - e.ts < 60 * 60000) e.amt.forEach((a, i) => (sent[i] += a || 0));
-    const room = [0, 1, 2, 3].map(k => t && now - t.ts < 6 * 3600000 ? Math.max(0, Math.floor(fill * (k < 3 ? t.cw : t.cg) - t.have[k] - sent[k])) : 1e9);
+    const room = destRoom(dest, fill, 120);
+    if (!room) { setStatus(`turgus → „${tv.name}“: jo sandėlio duomenys seni – laukiu, kol skriptas jį aplankys`); return false; }
     const st = stockInfo(); if (!st.cw) return false;
     const keep = Math.max(0, Math.min(100, my.keep ?? 0)) / 100, keepC = Math.max(0, Math.min(100, my.keepCrop ?? 10)) / 100;
     // „Palikti sau %“ – nuo VALANDINĖS GAMYBOS: kaimas pasilieka tiek % to, ką prigamina, likusi gamybos dalis kaupiasi siuntimui
@@ -3085,9 +3101,9 @@
     vset('ovfNext', Date.now() + rand(4, 8) * 60000);
     const vs = ownVillageList(), hd = (vs.find(v => roleOf(v.did) === 'HAMMER') || {}).did;
     if (ROLE !== 'HAMMER' && hd && top >= OVF_SEND && !attackSoon(String(hd), 60)) {
-      const tv = vs.find(v => v.did === hd), t = (jget('villStock', {}) || {})[hd], now = Date.now(), sent = [0, 0, 0, 0];
-      for (const e of jget('sentLog', [])) if (e.to === String(hd) && now - e.ts < 60 * 60000) e.amt.forEach((a, i) => (sent[i] += a || 0));
-      const room = [0, 1, 2, 3].map(k => t && now - t.ts < 3 * 3600000 ? Math.max(0, Math.floor(0.95 * (k < 3 ? t.cw : t.cg) - t.have[k] - sent[k])) : 1e9);
+      const tv = vs.find(v => v.did === hd);
+      const room = destRoom(hd, 0.95, 45) || [0, 0, 0, 0];                 // tik tiek, kiek HAMMER priims; jo duomenys seni – nesiunčiam (laukiam, kol skriptas jį aplankys)
+      if (!destRoom(hd, 0.95, 45)) setStatus(`perpildymas: „${(tv || {}).name}“ sandėlio duomenys seni – laukiu`);
       const send = [0, 1, 2, 3].map(k => Math.max(0, Math.min(room[k], Math.floor(st.have[k] - OVF_KEEP * (k < 3 ? st.cw : st.cg)))));
       if (tv && tv.x !== null && send.reduce((a, b) => a + b, 0) >= SUPPLY_MIN) {
         log(`PERPILDYMAS (${Math.round(top * 100)} %): perteklius ${send.join('/')} → HAMMER „${tv.name}“`);
@@ -4485,6 +4501,7 @@
   const heroResDid = () => { const vs = allVillages(), c = GM_getValue('heroResVil', 'auto'); return c !== 'auto' && vs.includes(c) ? c : (BONUS_TO_NEW ? vs[vs.length - 1] : DID); };
   const notNewest = () => { const vs = allVillages(); return vs.length > 1 && DID !== heroResDid(); };
   function maybeChores() {
+    noteStock();                                                            // šio kaimo sandėlis – kitiems kaimams (kiek galima atsiųsti)
     // Aukcionas baigiasi per kelias minutes – tai skubiausia (eilės ratu laukti negalima, kitaip taikinys pasensta)
     { const t = jget('aucTarget', null);
       if (t && GM_getValue('aucMode', 'test') !== 'off') { jset('aucTarget', null); if (Date.now() - t.ts < 180000) { startChore('auction', t.url); return true; } } }
